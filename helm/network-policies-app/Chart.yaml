@@ -1,10 +1,11 @@
 apiVersion: v2
 appVersion: 0.0.1
-version: 0.0.0-dev
+# version: 0.0.0-dev
+version: [[ .Version ]]
 
 name: network-policies
 
-description: CiliumNetworkPolicies and NetworkPolicies CRs that should be installed in target cluster.
+description: CiliumNetworkPolicies and NetworkPolicies cluster.Z that should be installed in target cluster.
 
 home: https://github.com/giantswarm/network-policies-app
 

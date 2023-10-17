@@ -15,42 +15,34 @@
               "project": {
                   "$ref": "#/definitions/Project"
               },
-              "image": {
-                  "$ref": "#/definitions/Image"
+              "denyByDefault": {
+                  "$ref": "#/definitions/DenyByDefault"
               }
           },
           "required": [
-              "image",
+              "denyByDefault",
               "name",
               "project",
               "serviceType"
           ],
           "title": "Welcome9"
       },
-      "Image": {
+      "DenyByDefault": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-              "registry": {
-                  "type": "string"
+              "enabled": {
+                  "type": "boolean"
               },
-              "name": {
-                  "type": "string"
-              },
-              "tag": {
-                  "type": "string"
-              },
-              "pullPolicy": {
-                  "type": "string"
+              "namespaces": {
+                  "type": "array"
               }
           },
           "required": [
-              "name",
-              "pullPolicy",
-              "registry",
-              "tag"
+              "enabled",
+              "namespaces"
           ],
-          "title": "Image"
+          "title": "denyByDefault"
       },
       "Project": {
           "type": "object",

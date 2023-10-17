@@ -5,8 +5,8 @@ project:
   branch: "[[ .Branch ]]"
   commit: "[[ .SHA ]]"
 
-image:
-  registry: quay.io
-  name: giantswarm/network-policies-app
-  tag: v0.0.1
-  pullPolicy: IfNotPresent
+denyByDefault:
+  enabled: true
+  namespaces:
+  - kube-system
+  - giantswarm

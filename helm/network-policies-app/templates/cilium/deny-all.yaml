@@ -1,0 +1,16 @@
+{{- if .Values.denyByDefault.enabled }}
+{{- range .Values.denyByDefault.namespaces }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: {{ . }}
+spec:
+  endpointSelector: {}
+  ingress:
+    - {}
+  egress:
+    - {}
+---
+{{- end }}
+{{- end }}

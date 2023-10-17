@@ -1,16 +1,16 @@
 version: 2.1
 orbs:
-  architect: giantswarm/architect@4.8.1
+  architect: giantswarm/architect@4.31.0
 
 workflows:
   package-and-push-chart-on-tag:
     jobs:
       - architect/push-to-app-catalog:
           context: "architect"
-          # executor: "app-build-suite" # uncomment this if you want automatic metadata generation and helm chart linting
+          executor: "app-build-suite" # uncomment this if you want automatic metadata generation and helm chart linting
           name: "package and push network-policies-app chart"
-          app_catalog: "giantswarm-playground-catalog"
-          app_catalog_test: "giantswarm-playground-test-catalog"
+          app_catalog: "cluster-catalog"
+          app_catalog_test: "cluster-test-catalog"
           chart: "network-policies-app"
           # Trigger job on git tag.
           filters:

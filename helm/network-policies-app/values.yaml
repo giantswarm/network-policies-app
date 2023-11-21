@@ -5,8 +5,18 @@ project:
   branch: "[[ .Branch ]]"
   commit: "[[ .SHA ]]"
 
+extraPolicies:
+  allowGlobalEgressToCoreDNS:
+    enabled: true
+
 denyByDefault:
   enabled: true
   namespaces:
   - kube-system
   - giantswarm
+
+allowApiServer:
+  # pods deployed in following namespace can talk to api server
+  namespaces:
+    - kube-system
+    - giantswarm

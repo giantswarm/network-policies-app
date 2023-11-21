@@ -62,6 +62,7 @@ jobs:
           fi
 
           base="${base#refs/heads/}" # Strip "refs/heads/" prefix.
+          [ -z "${base}" ] && base="main"
 
           version="$(echo $head | awk -F# '{print $NF}')"
           if [[ $version =~ ^major|minor|patch$ ]]; then

@@ -14,9 +14,3 @@ denyByDefault:
   namespaces:
   - kube-system
   - giantswarm
-
-allowApiServer:
-  # pods deployed in following namespace can talk to api server
-  namespaces:
-    - kube-system
-    - giantswarm

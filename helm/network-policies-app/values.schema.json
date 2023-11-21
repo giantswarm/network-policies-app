@@ -17,15 +17,18 @@
               },
               "denyByDefault": {
                   "$ref": "#/definitions/DenyByDefault"
-              }
+              },
+              "extraPolicies": {
+                "$ref": "#/definitions/ExtraPolicies"
+            }
           },
           "required": [
               "denyByDefault",
+              "extraPolicies",
               "name",
               "project",
               "serviceType"
-          ],
-          "title": "Welcome9"
+          ]
       },
       "DenyByDefault": {
           "type": "object",
@@ -43,6 +46,27 @@
               "namespaces"
           ],
           "title": "denyByDefault"
+      },
+      "ExtraPolicies": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "allowGlobalEgressToCoreDNS": {
+                "type": "object",
+                "properties": {
+                    "enabled": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [
+                    "enabled"
+                ]
+            }
+        },
+        "required": [
+            "allowGlobalEgressToCoreDNS"
+        ],
+        "title": "extraPolicies"
       },
       "Project": {
           "type": "object",

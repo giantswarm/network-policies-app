@@ -7,7 +7,7 @@ project:
 
 extraPolicies:
   allowGlobalEgressToCoreDNS:
-    enabled: true
+    enabled: false
 
 denyByDefault:
   enabled: true

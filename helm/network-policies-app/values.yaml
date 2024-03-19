@@ -5,11 +5,13 @@ project:
   branch: "[[ .Branch ]]"
   commit: "[[ .SHA ]]"
 
-extraPolicies:
-  allowGlobalEgressToCoreDNS:
-    enabled: false
-
 denyByDefault:
+  enabled: true
+  namespaces:
+  - kube-system
+  - giantswarm
+
+allowEgressToDNS:
   enabled: true
   namespaces:
   - kube-system

@@ -1,12 +1,12 @@
-{{- if .Values.extraPolicies.allowGlobalEgressToCoreDNS.enabled }}
+{{- if .Values.allowEgressToDNS.enabled }}
+{{- range .Values.allowEgressToDNS.namespaces }}
 apiVersion: cilium.io/v2
-kind: CiliumClusterwideNetworkPolicy
+kind: CiliumNetworkPolicy
 metadata:
-  name: allow-all-pods-in-all-ns-talk-to-coredns
-  namespace: kube-system
+  name: default-allow-dns
+  namespace: {{ . }}
 spec:
-  endpointSelector:
-    matchLabels: {}
+  endpointSelector: {}
   egress:
     - toEndpoints:
         - matchLabels:
@@ -14,18 +14,26 @@ spec:
             k8s-app: coredns
       toPorts:
         - ports:
-          - port: "9153"
-            protocol: TCP
-        - ports:
-          - port: "1053"
-            protocol: UDP
-          - port: "1053"
-            protocol: TCP
-          - port: "53"
-            protocol: UDP
-          - port: "53"
-            protocol: TCP
+            - port: "1053"
+              protocol: UDP
+            - port: "1053"
+              protocol: TCP
           rules:
             dns:
               - matchPattern: "*"
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: k8s-dns-node-cache
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchPattern: "*"
+---
+{{- end }}
 {{- end }}

@@ -16,3 +16,9 @@ allowEgressToDNS:
   namespaces:
   - kube-system
   - giantswarm
+
+allowEgressToProxy:
+  enabled: false
+  namespaces:
+  - kube-system
+  - giantswarm

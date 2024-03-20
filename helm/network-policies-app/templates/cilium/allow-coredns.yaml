@@ -18,11 +18,11 @@ spec:
               protocol: UDP
             - port: "1053"
               protocol: TCP
-    {{- if .Values.allowEgressToProxy.enabled }}
+    {{- if $.Values.allowEgressToProxy.enabled }}
           rules:
             dns:
               - matchPattern: "*"
-    {{ end -}}
+    {{- end }}
     - toEndpoints:
         - matchLabels:
             io.kubernetes.pod.namespace: kube-system
@@ -33,11 +33,11 @@ spec:
               protocol: UDP
             - port: "53"
               protocol: TCP
-    {{- if .Values.allowEgressToProxy.enabled }}
+    {{- if $.Values.allowEgressToProxy.enabled }}
           rules:
             dns:
               - matchPattern: "*"
-    {{ end -}}
+    {{- end }}
 ---
 {{- end }}
 {{- end }}

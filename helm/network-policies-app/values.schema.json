@@ -16,17 +16,25 @@
                   "$ref": "#/definitions/Project"
               },
               "denyByDefault": {
-                  "$ref": "#/definitions/DenyByDefault"
+                  "$ref": "#/definitions/Policy"
+              },
+              "allowEgressToDNS": {
+                  "$ref": "#/definitions/Policy"
+              },
+              "allowEgressToProxy": {
+                  "$ref": "#/definitions/Policy"
               }
           },
           "required": [
               "denyByDefault",
+              "allowEgressToDNS",
+              "allowEgressToProxy",
               "name",
               "project",
               "serviceType"
           ]
       },
-      "DenyByDefault": {
+      "Policy": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
@@ -41,7 +49,7 @@
               "enabled",
               "namespaces"
           ],
-          "title": "denyByDefault"
+          "title": "Policy"
       },
       "Project": {
           "type": "object",

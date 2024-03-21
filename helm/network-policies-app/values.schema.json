@@ -22,7 +22,7 @@
                   "$ref": "#/definitions/Policy"
               },
               "allowEgressToProxy": {
-                  "$ref": "#/definitions/Policy"
+                  "$ref": "#/definitions/ProxyPolicy"
               }
           },
           "required": [
@@ -43,6 +43,29 @@
               },
               "namespaces": {
                   "type": "array"
+              }
+          },
+          "required": [
+              "enabled",
+              "namespaces"
+          ],
+          "title": "Policy"
+      },
+      "ProxyPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+              "enabled": {
+                  "type": "boolean"
+              },
+              "namespaces": {
+                  "type": "array"
+              },
+              "httpProxy": {
+                  "type": "string"
+              },
+              "httpsProxy": {
+                  "type": "string"
               }
           },
           "required": [

@@ -12,7 +12,7 @@ denyByDefault:
   - giantswarm
 
 allowEgressToDNS:
-  enabled: true
+  enabled: false
   namespaces:
   - kube-system
   - giantswarm
@@ -22,3 +22,5 @@ allowEgressToProxy:
   namespaces:
   - kube-system
   - giantswarm
+  httpProxy: ""
+  httpsProxy: ""

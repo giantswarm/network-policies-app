@@ -1,5 +1,5 @@
 {{- if .Values.allowEgressToProxy.enabled }}
-{{ if not .Values.allowEgressToCoreDNS.enabled }}
+{{ if not .Values.allowEgressToDNS.enabled }}
 {{ fail "allowEgressToCoreDNS.enabled=true is required for allowEgressToProxy.enabled since DNS requests are captured by Cilium for the L7 toFQDNs feature. Make sure the same namespaces are allowed for DNS egress." }}
 {{ end -}}
 {{- range $_, $ns := (required "allowEgressToProxy.namespaces must be filled for allowEgressToProxy.enabled=true" .Values.allowEgressToProxy.namespaces) }}
@@ -16,12 +16,12 @@ spec:
         # The whole cluster should be allowed to reach the proxy. This currently does not limit the port range.
         {{/* Extract hostname without the port */}}
         {{- range $_, $proxyUrl := ((list
-              (regexReplaceAll ":[0-9]+.*" .Values.allowEgressToProxy.httpProxy "")
-              (regexReplaceAll ":[0-9]+.*" .Values.allowEgressToProxy.httpsProxy "")
+              (regexReplaceAll ":[0-9]+.*" $.Values.allowEgressToProxy.httpProxy "")
+              (regexReplaceAll ":[0-9]+.*" $.Values.allowEgressToProxy.httpsProxy "")
             ) | uniq) }}
         {{- if $proxyUrl }}
         - matchName: {{ index (urlParse $proxyUrl) "host" | required "Failed to parse hostname in allowEgressToProxy.httpProxy or allowEgressToProxy.httpsProxy" | quote }}
         {{- end }}
         {{- end }}
-{{ end -}}
-{{ end -}}
+{{- end }}
+{{- end }}

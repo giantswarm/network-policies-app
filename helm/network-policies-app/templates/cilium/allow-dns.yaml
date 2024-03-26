@@ -1,0 +1,35 @@
+{{- if .Values.allowEgressToDNS.enabled }}
+{{- range .Values.allowEgressToDNS.namespaces }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: default-allow-dns
+  namespace: {{ . }}
+spec:
+  endpointSelector: {}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: coredns
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: k8s-dns-node-cache
+      toPorts:
+        - ports:
+            - port: "1053"
+              protocol: UDP
+            - port: "1053"
+              protocol: TCP
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    {{- if $.Values.allowEgressToProxy.enabled }}
+          rules:
+            dns:
+              - matchPattern: "*"
+    {{- end }}
+---
+{{- end }}
+{{- end }}

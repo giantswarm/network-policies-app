@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add `allowEgressToDNS` policy disabled by default.
+- Add `allowEgressToProxy` policy disabled by default.
+
+### Removed
+
+- Remove coredns `CiliumClusterwideNetworkPolicy`.
+
 ## [0.0.4] - 2024-02-13
 
 - Changed: Disable coredns `CiliumClusterwideNetworkPolicy` by default.

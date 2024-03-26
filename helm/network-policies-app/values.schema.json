@@ -16,21 +16,25 @@
                   "$ref": "#/definitions/Project"
               },
               "denyByDefault": {
-                  "$ref": "#/definitions/DenyByDefault"
+                  "$ref": "#/definitions/Policy"
               },
-              "extraPolicies": {
-                "$ref": "#/definitions/ExtraPolicies"
-            }
+              "allowEgressToDNS": {
+                  "$ref": "#/definitions/Policy"
+              },
+              "allowEgressToProxy": {
+                  "$ref": "#/definitions/ProxyPolicy"
+              }
           },
           "required": [
               "denyByDefault",
-              "extraPolicies",
+              "allowEgressToDNS",
+              "allowEgressToProxy",
               "name",
               "project",
               "serviceType"
           ]
       },
-      "DenyByDefault": {
+      "Policy": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
@@ -45,28 +49,30 @@
               "enabled",
               "namespaces"
           ],
-          "title": "denyByDefault"
+          "title": "Policy"
       },
-      "ExtraPolicies": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "allowGlobalEgressToCoreDNS": {
-                "type": "object",
-                "properties": {
-                    "enabled": {
-                        "type": "boolean"
-                    }
-                },
-                "required": [
-                    "enabled"
-                ]
-            }
-        },
-        "required": [
-            "allowGlobalEgressToCoreDNS"
-        ],
-        "title": "extraPolicies"
+      "ProxyPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+              "enabled": {
+                  "type": "boolean"
+              },
+              "namespaces": {
+                  "type": "array"
+              },
+              "httpProxy": {
+                  "type": "string"
+              },
+              "httpsProxy": {
+                  "type": "string"
+              }
+          },
+          "required": [
+              "enabled",
+              "namespaces"
+          ],
+          "title": "Policy"
       },
       "Project": {
           "type": "object",

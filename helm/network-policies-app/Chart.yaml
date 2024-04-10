@@ -1,11 +1,10 @@
 apiVersion: v2
 appVersion: 0.0.1
-# version: 0.0.0-dev
-version: [[ .Version ]]
+version: 0.1.0
 
 name: network-policies
 
-description: CiliumNetworkPolicies and NetworkPolicies cluster.Z that should be installed in target cluster.
+description: CiliumNetworkPolicies and NetworkPolicies that should be installed in target cluster.
 
 home: https://github.com/giantswarm/network-policies-app
 
@@ -17,7 +16,7 @@ sources:
 - https://github.com/giantswarm/network-policies-app
 
 annotations:
-  application.giantswarm.io/team: rocket
+  application.giantswarm.io/team: cabbage
 maintainers:
-  - name: Team Rocket
-    email: team-rocket@giantswarm.io
+  - name: Team Cabbage
+    email: team-cabbage@giantswarm.io

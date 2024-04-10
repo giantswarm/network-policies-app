@@ -1,20 +1,14 @@
 apiVersion: v2
 appVersion: 0.0.1
-version: 0.1.0
-
+version: 0.1.1
 name: network-policies
-
 description: CiliumNetworkPolicies and NetworkPolicies that should be installed in target cluster.
-
 home: https://github.com/giantswarm/network-policies-app
-
 # If you have an icon/logo, you should add it to https://github.com/giantswarm/web-assets
 # and set the final URL as a value here and uncomment.
 icon: https://s.giantswarm.io/app-icons/kubernetes-netpol/1/light.svg
-
 sources:
-- https://github.com/giantswarm/network-policies-app
-
+  - https://github.com/giantswarm/network-policies-app
 annotations:
   application.giantswarm.io/team: cabbage
 maintainers:

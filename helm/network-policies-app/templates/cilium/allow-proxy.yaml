@@ -14,10 +14,16 @@ spec:
   egress:
     - toFQDNs:
         # The whole cluster should be allowed to reach the proxy. This currently does not limit the port range.
-        {{/* Extract hostname without the port */}}
+        {{/*
+        The first 2 lines are for aws and azure that have the proxy explicitely in the cluster chart schema.
+        The next 2 lines are for vSphere and VCD that have the <name>-cluster-values secret (which contains the proxy env) mounted in the HelmRelease.
+        Extract hostname without the port.
+        */}}
         {{- range $_, $proxyUrl := ((list
               (regexReplaceAll ":[0-9]+.*" $.Values.allowEgressToProxy.httpProxy "")
-              (regexReplaceAll ":[0-9]+.*" $.Values.allowEgressToProxy.httpsProxy "")
+              (regexReplaceAll ":[0-9]+.*" $.Values.allowEgressToProxy.httpsProxy "") 
+              (regexReplaceAll ":[0-9]+.*" $.Values.http_proxy "")
+              (regexReplaceAll ":[0-9]+.*" $.Values.https_proxy "")
             ) | uniq) }}
         {{- if $proxyUrl }}
         - matchName: {{ index (urlParse $proxyUrl) "host" | required "Failed to parse hostname in allowEgressToProxy.httpProxy or allowEgressToProxy.httpsProxy" | quote }}

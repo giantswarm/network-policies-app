@@ -24,3 +24,6 @@ allowEgressToProxy:
   - giantswarm
   httpProxy: ""
   httpsProxy: ""
+
+http_proxy: ""
+https_proxy: ""

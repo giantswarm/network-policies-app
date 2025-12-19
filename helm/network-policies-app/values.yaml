@@ -24,3 +24,8 @@ allowEgressToProxy:
   - giantswarm
   httpProxy: ""
   httpsProxy: ""
+
+kamaji:
+  enabled: false
+  namespaces:
+  - kube-system

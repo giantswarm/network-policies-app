@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add support for Kamaji.
+
 ## [0.1.1] - 2024-04-10
 
 ### Changed

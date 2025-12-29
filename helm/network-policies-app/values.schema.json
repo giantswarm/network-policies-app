@@ -23,12 +23,16 @@
               },
               "allowEgressToProxy": {
                   "$ref": "#/definitions/ProxyPolicy"
+              },
+              "kamaji": {
+                  "$ref": "#/definitions/ProxyPolicy"
               }
           },
           "required": [
               "denyByDefault",
               "allowEgressToDNS",
               "allowEgressToProxy",
+              "kamaji",
               "name",
               "project",
               "serviceType"

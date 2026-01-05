@@ -1,0 +1,24 @@
+{{- if .Values.kamaji.enabled }}
+{{- range .Values.kamaji.namespaces }}
+apiVersion: "cilium.io/v2"
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-ingress-from-konnectivity
+  namespace: kyverno
+spec:
+  endpointSelector:
+    matchLabels:
+      # Targets the Kyverno Admission Controller pods
+      app.kubernetes.io/component: admission-controller
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            # Allows traffic from the Konnectivity Agent in kube-system
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            k8s-app: konnectivity-agent
+      toPorts:
+        - ports:
+            - port: "9443"
+---
+{{- end }}
+{{- end }}

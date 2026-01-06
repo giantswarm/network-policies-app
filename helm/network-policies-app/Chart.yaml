@@ -1,6 +1,6 @@
 apiVersion: v2
 appVersion: 0.0.1
-version: 0.1.1
+version: 0.1.2
 name: network-policies
 description: CiliumNetworkPolicies and NetworkPolicies that should be installed in target cluster.
 home: https://github.com/giantswarm/network-policies-app

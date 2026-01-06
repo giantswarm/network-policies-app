@@ -1,5 +1,4 @@
 {{- if .Values.kamaji.enabled }}
-{{- range .Values.kamaji.namespaces }}
 apiVersion: "cilium.io/v2"
 kind: CiliumNetworkPolicy
 metadata:
@@ -20,5 +19,4 @@ spec:
         - ports:
             - port: "9443"
 ---
-{{- end }}
 {{- end }}

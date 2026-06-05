@@ -27,6 +27,12 @@
 # Allow traffic to the API Server (Management Tunnel)
 - toEntities:
     - kube-apiserver
+
+# Allow traffic to DNS
+- toPorts:
+    - ports:
+      - port: "53"
+        protocol: UDP
 {{- end -}}
 
 {{- if include "network-policies-app.konnectivityAgent.enabled" . -}}

@@ -25,7 +25,10 @@
                   "$ref": "#/definitions/ProxyPolicy"
               },
               "kamaji": {
-                  "$ref": "#/definitions/ProxyPolicy"
+                  "$ref": "#/definitions/Policy"
+              },
+              "konnectivityAgent": {
+                  "$ref": "#/definitions/Policy"
               }
           },
           "required": [
@@ -33,6 +36,7 @@
               "allowEgressToDNS",
               "allowEgressToProxy",
               "kamaji",
+              "konnectivityAgent",
               "name",
               "project",
               "serviceType"

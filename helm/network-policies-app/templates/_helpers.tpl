@@ -36,3 +36,20 @@ giantswarm.io/service-type: {{ .Values.serviceType }}
 helm.sh/chart: {{ include "chart" . | quote }}
 {{- end -}}
 
+
+{{- define "network-policies-app.konnectivityAgent.enabled" -}}
+{{- if or .Values.konnectivityAgent.enabled .Values.kamaji.enabled -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{- define "network-policies-app.konnectivityAgent.namespaces" -}}
+{{- $namespaces := list -}}
+{{- if .Values.konnectivityAgent.enabled -}}
+{{- $namespaces = concat $namespaces .Values.konnectivityAgent.namespaces -}}
+{{- end -}}
+{{- if .Values.kamaji.enabled -}}
+{{- $namespaces = concat $namespaces .Values.kamaji.namespaces -}}
+{{- end -}}
+{{- $namespaces | uniq | toYaml -}}
+{{- end -}}

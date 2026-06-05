@@ -1,0 +1,62 @@
+{{- define "network-policies-app.konnectivityAgent.egress" -}}
+# Allow traffic to any Pod within the kube-system namespace
+# (Covers Metrics Server, CoreDNS, etc.)
+- toEndpoints:
+    - matchLabels:
+        "k8s:io.kubernetes.pod.namespace": kube-system
+
+# Allow traffic to Kyverno Admission Controller in its own namespace
+- toEndpoints:
+    - matchLabels:
+        "k8s:io.kubernetes.pod.namespace": kyverno
+        app.kubernetes.io/instance: kyverno # Standard Kyverno label
+  toPorts:
+    - ports:
+        - port: "9443"
+          protocol: TCP
+
+# Allow traffic to the Nodes (Kubelet 10250)
+- toEntities:
+    - host
+    - remote-node
+  toPorts:
+    - ports:
+        - port: "10250"
+          protocol: TCP
+
+# Allow traffic to the API Server (Management Tunnel)
+- toEntities:
+    - kube-apiserver
+
+# Allow traffic to DNS
+- toPorts:
+    - ports:
+      - port: "53"
+        protocol: UDP
+{{- end -}}
+
+{{- if include "network-policies-app.konnectivityAgent.enabled" . -}}
+{{- range $namespace := (include "network-policies-app.konnectivityAgent.namespaces" . | fromYamlArray) }}
+apiVersion: "cilium.io/v2"
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-konnectivity
+  namespace: {{ $namespace }}
+specs:
+  - endpointSelector:
+      matchLabels: # used in kamaji
+        k8s-app: konnectivity-agent
+    egress:
+      {{- include "network-policies-app.konnectivityAgent.egress" $ | nindent 6 }}
+  - endpointSelector:
+      matchExpressions:
+      - key: app # used in AKS
+        operator: In
+        values:
+          - konnectivity-agent
+          - konnectivity-agent-autoscaler
+    egress:
+      {{- include "network-policies-app.konnectivityAgent.egress" $ | nindent 6 }}
+---
+{{- end }}
+{{- end }}

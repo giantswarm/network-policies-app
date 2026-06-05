@@ -15,6 +15,9 @@ spec:
         - matchLabels:
             io.kubernetes.pod.namespace: kube-system
             k8s-app: k8s-dns-node-cache
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns # Used in AKS
       toPorts:
         - ports:
             - port: "1053"

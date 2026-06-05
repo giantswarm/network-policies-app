@@ -25,7 +25,13 @@ allowEgressToProxy:
   httpProxy: ""
   httpsProxy: ""
 
+# deprecated: use konnectivityAgent instead
 kamaji:
+  enabled: false
+  namespaces:
+  - kube-system
+
+konnectivityAgent:
   enabled: false
   namespaces:
   - kube-system

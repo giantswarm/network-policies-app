@@ -9,8 +9,13 @@ home: https://github.com/giantswarm/network-policies-app
 icon: https://s.giantswarm.io/app-icons/kubernetes-netpol/1/light.svg
 sources:
   - https://github.com/giantswarm/network-policies-app
+keywords:
+  - networking
+  - network-policy
+  - cilium
+  - security
 annotations:
-  application.giantswarm.io/team: cabbage
+  io.giantswarm.application.team: cabbage
 maintainers:
   - name: Team Cabbage
     email: team-cabbage@giantswarm.io

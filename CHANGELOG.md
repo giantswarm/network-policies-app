@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Move the team annotation from the legacy `application.giantswarm.io/team` key to
+  `io.giantswarm.application.team`, and point `_helpers.tpl` at the new key. The emitted label key is
+  unchanged, and `labels.common` is not included by any template, so rendered output is identical.
+
+### Added
+
+- Add `keywords` to `Chart.yaml`.
+
 ## [0.2.0] - 2026-06-05
 
 ### Added

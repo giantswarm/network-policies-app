@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Declare the `io.giantswarm.application.audience` (`all`) and
   `io.giantswarm.application.managed` (`true`) annotations, completing the
   [chart metadata standard](https://docs.giantswarm.io/reference/platform-api/chart-metadata/).
+- Add optional `denyEgressToIMDS` policy denying pod egress to the instance metadata service. Disabled by default.
 
 ## [0.2.0] - 2026-06-05
 

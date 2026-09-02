@@ -1,0 +1,38 @@
+{{- if .Values.denyEgressToIMDS.enabled }}
+{{- if not .Values.denyEgressToIMDS.cidrs }}
+{{- fail "denyEgressToIMDS.cidrs must not be empty for denyEgressToIMDS.enabled=true" }}
+{{- end }}
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: deny-egress-to-imds
+spec:
+  description: "Deny pod egress to the instance metadata service so pods cannot assume the node IAM role."
+  endpointSelector:
+    {{- if or .Values.denyEgressToIMDS.excludedNamespaces .Values.denyEgressToIMDS.excludedNamespaceLabels }}
+    matchExpressions:
+      {{- if .Values.denyEgressToIMDS.excludedNamespaces }}
+      - key: io.kubernetes.pod.namespace
+        operator: NotIn
+        values:
+          {{- toYaml .Values.denyEgressToIMDS.excludedNamespaces | nindent 10 }}
+      {{- end }}
+      {{- range $label := .Values.denyEgressToIMDS.excludedNamespaceLabels }}
+      {{- if or (not $label.key) (not $label.values) }}
+      {{- fail "every denyEgressToIMDS.excludedNamespaceLabels entry needs a key and a non-empty values list" }}
+      {{- end }}
+      - key: io.cilium.k8s.namespace.labels.{{ $label.key }}
+        operator: NotIn
+        values:
+          {{- toYaml $label.values | nindent 10 }}
+      {{- end }}
+    {{- else }}
+    {}
+    {{- end }}
+  # Pure deny: the policy must not put endpoints into egress default-deny mode.
+  enableDefaultDeny:
+    egress: false
+  egressDeny:
+    - toCIDR:
+        {{- toYaml .Values.denyEgressToIMDS.cidrs | nindent 8 }}
+{{- end }}

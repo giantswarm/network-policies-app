@@ -35,3 +35,12 @@ konnectivityAgent:
   enabled: false
   namespaces:
   - kube-system
+
+denyEgressToIMDS:
+  enabled: false
+  cidrs:
+  - 169.254.169.254/32
+  excludedNamespaces:
+  - kube-system
+  - giantswarm
+  excludedNamespaceLabels: []

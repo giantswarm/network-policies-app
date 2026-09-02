@@ -29,10 +29,14 @@
               },
               "konnectivityAgent": {
                   "$ref": "#/definitions/Policy"
+              },
+              "denyEgressToIMDS": {
+                  "$ref": "#/definitions/IMDSPolicy"
               }
           },
           "required": [
               "denyByDefault",
+              "denyEgressToIMDS",
               "allowEgressToDNS",
               "allowEgressToProxy",
               "kamaji",
@@ -58,6 +62,31 @@
               "namespaces"
           ],
           "title": "Policy"
+      },
+      "IMDSPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+              "enabled": {
+                  "type": "boolean"
+              },
+              "cidrs": {
+                  "type": "array"
+              },
+              "excludedNamespaces": {
+                  "type": "array"
+              },
+              "excludedNamespaceLabels": {
+                  "type": "array"
+              }
+          },
+          "required": [
+              "enabled",
+              "cidrs",
+              "excludedNamespaces",
+              "excludedNamespaceLabels"
+          ],
+          "title": "IMDSPolicy"
       },
       "ProxyPolicy": {
           "type": "object",

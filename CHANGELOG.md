@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Add `keywords` to `Chart.yaml`.
+- Declare the `io.giantswarm.application.audience` (`all`) and
+  `io.giantswarm.application.managed` (`true`) annotations, completing the
+  [chart metadata standard](https://docs.giantswarm.io/reference/platform-api/chart-metadata/).
 
 ## [0.2.0] - 2026-06-05
 

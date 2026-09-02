@@ -15,6 +15,8 @@ keywords:
   - cilium
   - security
 annotations:
+  io.giantswarm.application.audience: all
+  io.giantswarm.application.managed: "true"
   io.giantswarm.application.team: cabbage
 maintainers:
   - name: Team Cabbage

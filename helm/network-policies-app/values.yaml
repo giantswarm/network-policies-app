@@ -40,7 +40,6 @@ denyEgressToIMDS:
   enabled: false
   cidrs:
   - 169.254.169.254/32
-  excludedNamespaces:
-  - kube-system
-  - giantswarm
+  # kube-system and giantswarm are always excluded, these are added to them
+  excludedNamespaces: []
   excludedNamespaceLabels: []

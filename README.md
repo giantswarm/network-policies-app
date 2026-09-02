@@ -78,15 +78,21 @@ is a list, so dual-stack clusters can add the IPv6 address `fd00:ec2::254/128`.
 
 #### Exempting workloads that need IMDS
 
-Because a deny cannot be undone by an allow, exemptions are expressed as exclusions in
-the policy's own endpoint selector, at namespace granularity. Exclude by namespace name:
+`kube-system` and `giantswarm` are always excluded and cannot be removed through the
+values. `kube-system` must stay excluded: `ebs-csi-node` and `aws-pod-identity-webhook`
+both authenticate through IMDS using the node role, and the latter needs it to resolve
+short-form `role-arn` annotations for every app relying on IRSA.
+`aws-cloud-controller-manager` needs no exemption because it runs with
+`hostNetwork: true`.
+
+Because a deny cannot be undone by an allow, further exemptions are expressed as
+exclusions in the policy's own endpoint selector, at namespace granularity. Additional
+namespaces are added to the two above, never replacing them:
 
 ```yaml
 denyEgressToIMDS:
   enabled: true
   excludedNamespaces:
-  - kube-system
-  - giantswarm
   - my-namespace
 ```
 
@@ -105,12 +111,6 @@ denyEgressToIMDS:
 Every namespace labelled `policy.giantswarm.io/allow-imds: "true"` is then exempt. Note
 that anyone who can label a namespace can grant that exemption, and that relabelling a
 namespace recalculates the Cilium identity of every endpoint in it.
-
-`kube-system` and `giantswarm` are excluded by default. `kube-system` must stay
-excluded: `ebs-csi-node` and `aws-pod-identity-webhook` both authenticate through IMDS
-using the node role, and the latter needs it to resolve short-form `role-arn`
-annotations for every app relying on IRSA. `aws-cloud-controller-manager` needs no
-exemption because it runs with `hostNetwork: true`.
 
 The same policy works on any provider whose metadata service answers on
 `169.254.169.254`, which includes AWS, Azure and GCP. Only the set of platform

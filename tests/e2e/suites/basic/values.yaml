@@ -1,0 +1,8 @@
+denyEgressToIMDS:
+  enabled: true
+  excludedNamespaces:
+  - imds-e2e-name-exempt
+  excludedNamespaceLabels:
+  - key: policy.giantswarm.io/allow-imds
+    values:
+    - "true"

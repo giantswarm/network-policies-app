@@ -3,7 +3,7 @@
 {{- fail "denyEgressToIMDS.cidrs must not be empty for denyEgressToIMDS.enabled=true" }}
 {{- end }}
 {{- /* These namespaces host platform components that authenticate through IMDS using the node role, so they are always excluded and cannot be removed through the values. */}}
-{{- $excludedNamespaces := concat (list "kube-system" "giantswarm") (.Values.denyEgressToIMDS.excludedNamespaces | default list) | uniq }}
+{{- $excludedNamespaces := concat (list "kube-system" "giantswarm" "karpenter" "aws-load-balancer-controller") (.Values.denyEgressToIMDS.excludedNamespaces | default list) | uniq }}
 apiVersion: cilium.io/v2
 kind: CiliumClusterwideNetworkPolicy
 metadata:

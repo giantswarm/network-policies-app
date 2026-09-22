@@ -78,16 +78,19 @@ is a list, so dual-stack clusters can add the IPv6 address `fd00:ec2::254/128`.
 
 #### Exempting workloads that need IMDS
 
-`kube-system` and `giantswarm` are always excluded and cannot be removed through the
-values. `kube-system` must stay excluded: `ebs-csi-node` and `aws-pod-identity-webhook`
-both authenticate through IMDS using the node role, and the latter needs it to resolve
-short-form `role-arn` annotations for every app relying on IRSA.
+`kube-system`, `giantswarm`, `karpenter` and `aws-load-balancer-controller` are always
+excluded and cannot be removed through the values. `kube-system` must stay excluded:
+`ebs-csi-node` and `aws-pod-identity-webhook` both authenticate through IMDS using the
+node role, and the latter needs it to resolve short-form `role-arn` annotations for
+every app relying on IRSA. `karpenter` and `aws-load-balancer-controller` reach the
+cloud provider API with the node role and read the instance identity from IMDS, so both
+lose their credentials and their region and VPC discovery without the exemption.
 `aws-cloud-controller-manager` needs no exemption because it runs with
 `hostNetwork: true`.
 
 Because a deny cannot be undone by an allow, further exemptions are expressed as
 exclusions in the policy's own endpoint selector, at namespace granularity. Additional
-namespaces are added to the two above, never replacing them:
+namespaces are added to the four above, never replacing them:
 
 ```yaml
 denyEgressToIMDS:

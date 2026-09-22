@@ -159,7 +159,7 @@ func TestBasic(t *testing.T) {
 					excluded[expression.Key] = expression.Values
 				}
 				Expect(excluded).To(HaveKey("io.kubernetes.pod.namespace"))
-				Expect(excluded["io.kubernetes.pod.namespace"]).To(ContainElements(installNamespace, "giantswarm", nameExemptNamespace))
+				Expect(excluded["io.kubernetes.pod.namespace"]).To(ContainElements(installNamespace, "giantswarm", "karpenter", "aws-load-balancer-controller", nameExemptNamespace))
 				Expect(excluded).To(HaveKey(fmt.Sprintf("io.cilium.k8s.namespace.labels.%s", exemptLabelKey)))
 				Expect(excluded[fmt.Sprintf("io.cilium.k8s.namespace.labels.%s", exemptLabelKey)]).To(ContainElement(exemptLabelValue))
 

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Always exclude the `karpenter` and `aws-load-balancer-controller` namespaces from `denyEgressToIMDS`.
+
 ## [0.3.0] - 2026-09-04
 
 ### Changed

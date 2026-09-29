@@ -1,13 +1,15 @@
 {{- if include "network-policies-app.konnectivityAgent.enabled" . -}}
 apiVersion: "cilium.io/v2"
-kind: CiliumNetworkPolicy
+kind: CiliumClusterwideNetworkPolicy
 metadata:
-  name: allow-ingress-from-konnectivity
-  namespace: kyverno
+  name: allow-kyverno-ingress-from-konnectivity
 spec:
+  description: "Allow the Konnectivity agent to reach the Kyverno admission controller webhook."
   endpointSelector:
     matchLabels:
-      # Targets the Kyverno Admission Controller pods
+      # Targets the Kyverno Admission Controller pods. This is a cluster-wide policy so that it can
+      # be installed before the kyverno namespace exists, and starts matching once Kyverno is there.
+      "k8s:io.kubernetes.pod.namespace": kyverno
       app.kubernetes.io/component: admission-controller
   ingress:
     - fromEndpoints:
@@ -26,5 +28,4 @@ spec:
       toPorts:
         - ports:
             - port: "9443"
----
 {{- end }}

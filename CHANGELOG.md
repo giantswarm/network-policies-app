@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Convert the `allow-ingress-from-konnectivity` `CiliumNetworkPolicy` into a `CiliumClusterwideNetworkPolicy` named
+  `allow-kyverno-ingress-from-konnectivity`, selecting the Kyverno admission controller pods by namespace label.
+
 ## [0.3.1] - 2026-09-22
 
 ### Changed

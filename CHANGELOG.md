@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Convert the `allow-ingress-from-konnectivity` policy into a `CiliumClusterwideNetworkPolicy` named
+  `allow-kyverno-ingress-from-konnectivity`. It previously lived in the `kyverno` namespace, which does not exist yet
+  when this chart is installed, causing the installation to fail and blocking every component that depends on network
+  policies being in place. The cluster-wide policy selects the same Kyverno admission controller pods through the
+  namespace label, so enforcement is unchanged once Kyverno is installed.
+
 ## [0.3.1] - 2026-09-22
 
 ### Changed

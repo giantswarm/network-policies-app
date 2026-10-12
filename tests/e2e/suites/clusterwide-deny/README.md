@@ -9,16 +9,17 @@ pods, not on rendered manifests.
 ## Status
 
 Scaffold. The values key `denyByDefault.clusterWide.enabled` does not exist in
-the chart yet; it arrives with giantswarm/roadmap#4340. Until then the chart
-ignores it (or rejects it if the values schema forbids unknown keys), so the
-suite is expected to fail. Do not wire it into a required check before #4340
+the chart yet; it arrives with giantswarm/roadmap#4340. Until then the chart's
+`values.schema.json` rejects it (additionalProperties is false), so the
+HelmRelease install fails and the suite is expected to fail fast: the specs
+run in an `Ordered` container, so everything after the install spec is skipped. Do not wire it into a required check before #4340
 lands. Only the first behaviour is implemented, the rest are pending (`PIt`).
 
 ## Layout
 
 - `clusterwide_deny_suite_test.go` the suite and one `Describe` per behaviour.
-- `probe_test.go` reusable helpers: namespaces with labels and annotations,
-  probe and listener pods, reachability assertions, live label flips.
+- `probe_test.go` reusable helpers: namespaces with labels,
+  probe and listener pods, reachability assertions.
 - `values.yaml` chart values for this suite.
 - `config.yaml` provider list (overrides `../../config.yaml` for this suite).
 

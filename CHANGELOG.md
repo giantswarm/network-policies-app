@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Scaffold the `clusterwide-deny` E2E suite (first case implemented, the rest pending).
+- Add the `clusterwide-deny` E2E test suite scaffold.
 
 ## [0.3.2] - 2026-09-29
 

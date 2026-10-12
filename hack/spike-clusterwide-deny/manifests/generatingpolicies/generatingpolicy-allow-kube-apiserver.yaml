@@ -1,0 +1,67 @@
+# GeneratingPolicy ddn-spike-allow-kube-apiserver (kit copy of allow-kube-apiserver; acts only on namespaces labeled spike.giantswarm.io/owner=default-deny-netpol): Namespace annotation policy.giantswarm.io/allow-kube-apiserver: "true" -> CiliumNetworkPolicy allow-kube-apiserver in that namespace.
+# apiVersion policies.kyverno.io/v1beta1 is the storage version in Kyverno v1.18.2 (see ../../SOURCES.md).
+apiVersion: policies.kyverno.io/v1beta1
+kind: GeneratingPolicy
+metadata:
+  name: ddn-spike-allow-kube-apiserver
+  labels:
+    spike.giantswarm.io/owner: default-deny-netpol
+spec:
+  evaluation:
+    synchronize:
+      enabled: true          # annotation removal deletes the CNP, hand edits are reverted
+    generateExisting:
+      enabled: true          # namespaces annotated while Kyverno was down (run-checklist.sh ac5b / restart verify)
+  matchConstraints:
+    # Deliberately NO objectSelector / namespaceSelector: policies without matchConditions share ONE webhook
+    # (gpol.validate.kyverno.svc-ignore) whose selectors are taken from whichever policy the informer lists last
+    # (pkg/controllers/webhook/validating.go:196-211), so a kit selector could silently stop foreign
+    # GeneratingPolicies from receiving admission events. The owner-label + annotation gate in the variables below
+    # is the only filter. GeneratingPolicy failurePolicy is hard-coded Ignore (see ../../SOURCES.md).
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]   # Kyverno forces CREATE/UPDATE/DELETE/CONNECT on the webhook rules of a GeneratingPolicy anyway (validating.go:270-282)
+        resources: ["namespaces"]
+  variables:
+    - name: nsName
+      expression: object.metadata.name
+    - name: enabled
+      expression: >-
+        has(object.metadata.labels) &&
+        "spike.giantswarm.io/owner" in object.metadata.labels &&
+        object.metadata.labels["spike.giantswarm.io/owner"] == "default-deny-netpol" &&
+        has(object.metadata.annotations) &&
+        "policy.giantswarm.io/allow-kube-apiserver" in object.metadata.annotations &&
+        object.metadata.annotations["policy.giantswarm.io/allow-kube-apiserver"] == "true"
+    - name: policy
+      expression: >-
+        dyn([
+          dyn({
+            "apiVersion": dyn("cilium.io/v2"),
+            "kind": dyn("CiliumNetworkPolicy"),
+            "metadata": dyn({
+              "name": dyn("ddn-spike-allow-kube-apiserver"),
+              "namespace": dyn(string(variables.nsName)),
+              "labels": dyn({
+                "spike.giantswarm.io/owner": dyn("default-deny-netpol")
+              })
+            }),
+            "spec": dyn({
+              "description": dyn("Egress to the kube-apiserver entity."),
+              "endpointSelector": dyn({}),
+              "egress": dyn([
+                dyn({
+                  "toEntities": dyn([
+                    "kube-apiserver"
+                  ])
+                })
+              ])
+            })
+          })
+        ])
+  generate:
+    # Generating nothing when the annotation is absent is what makes synchronize delete the CNP:
+    # on UPDATE Kyverno first deletes the downstreams of the trigger, then re-applies only if enabled.
+    - expression: >-
+        variables.enabled ? generator.apply(variables.nsName, variables.policy) : true

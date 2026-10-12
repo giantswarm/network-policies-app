@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add a hand-run spike kit for the clusterwide default deny under `hack/spike-clusterwide-deny/` (giantswarm/roadmap#4339).
+
 ## [0.3.2] - 2026-09-29
 
 ### Changed

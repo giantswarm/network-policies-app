@@ -1,0 +1,26 @@
+# Kit copy of the PRD policy "default-deny-all-namespaces". Renamed ddn-spike-* so that the kit never touches a real policy.
+# Clusterwide deny (see PRD "The clusterwide deny").
+# Selects every endpoint except those in a namespace labeled policy.giantswarm.io/default-deny: "false"
+# (the namespace opt-out). NotIn also matches namespaces that do not carry the label at all, so
+# unlabeled namespaces are denied. Same selector pattern as deny-egress-to-imds in network-policies-app.
+# `ingress: [{}]` / `egress: [{}]` is the same empty rule today's per-namespace default-deny-all uses:
+# it allows nothing and only switches the endpoint into default-deny for that direction.
+# WARNING: this denies ALL traffic of ALL namespaces (kube-system and giantswarm included) on the cluster.
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: ddn-spike-default-deny-all-namespaces
+  labels:
+    spike.giantswarm.io/owner: default-deny-netpol
+spec:
+  description: "Spike: clusterwide deny for all namespaces except those with the namespace opt-out label."
+  endpointSelector:
+    matchExpressions:
+      - key: io.cilium.k8s.namespace.labels.policy.giantswarm.io/default-deny
+        operator: NotIn
+        values:
+          - "false"
+  ingress:
+    - {}
+  egress:
+    - {}

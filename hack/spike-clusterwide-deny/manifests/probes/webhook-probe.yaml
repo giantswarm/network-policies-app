@@ -1,0 +1,77 @@
+# Webhook-ingress probe: a TCP listener that logs every byte it receives (socat -v -> pod log) and a
+# ValidatingWebhookConfiguration scoped to ConfigMap CREATE in ddn-spike-webhook only, failurePolicy Ignore.
+# Creating a ConfigMap there makes the API server open a connection to webhook:8443; the connection (a TLS
+# ClientHello that the listener never answers) shows up in the pod log iff ingress from the API server is allowed.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ddn-spike-webhook
+  labels:
+    spike.giantswarm.io/owner: default-deny-netpol
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: webhook
+  namespace: ddn-spike-webhook
+  labels:
+    app: webhook
+    spike.giantswarm.io/owner: default-deny-netpol
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: webhook
+      image: nicolaka/netshoot:v0.13
+      command: ["socat", "-v", "TCP-LISTEN:8443,fork,reuseaddr", "SYSTEM:sleep 1"]
+      ports:
+        - containerPort: 8443
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        seccompProfile:
+          type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webhook
+  namespace: ddn-spike-webhook
+  labels:
+    spike.giantswarm.io/owner: default-deny-netpol
+spec:
+  selector:
+    app: webhook
+  ports:
+    - port: 8443
+      targetPort: 8443
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: ddn-spike-webhook
+  labels:
+    spike.giantswarm.io/owner: default-deny-netpol
+webhooks:
+  - name: probe.ddn-spike.giantswarm.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore
+    timeoutSeconds: 3
+    clientConfig:
+      service:
+        name: webhook
+        namespace: ddn-spike-webhook
+        port: 8443
+        path: /validate
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: ddn-spike-webhook
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["configmaps"]
+        scope: Namespaced

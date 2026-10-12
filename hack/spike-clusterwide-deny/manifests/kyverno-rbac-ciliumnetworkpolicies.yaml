@@ -1,0 +1,24 @@
+# Lets Kyverno's background controller manage the CiliumNetworkPolicies that the GeneratingPolicies produce.
+# The background controller ClusterRole aggregates every ClusterRole labeled
+# rbac.kyverno.io/aggregate-to-background-controller: "true"
+# (charts/kyverno/templates/background-controller/clusterrole.yaml in Kyverno v1.18.2).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ddn-spike-background-controller-ciliumnetworkpolicies
+  labels:
+    rbac.kyverno.io/aggregate-to-background-controller: "true"
+    spike.giantswarm.io/owner: default-deny-netpol
+rules:
+  - apiGroups:
+      - cilium.io
+    resources:
+      - ciliumnetworkpolicies
+    verbs:
+      - create
+      - get
+      - list
+      - watch
+      - update
+      - patch
+      - delete

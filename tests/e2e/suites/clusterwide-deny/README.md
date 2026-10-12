@@ -12,8 +12,8 @@ Scaffold. The values key `denyByDefault.clusterWide.enabled` does not exist in
 the chart yet; it arrives with giantswarm/roadmap#4340. Until then the chart's
 `values.schema.json` rejects it (additionalProperties is false), so the
 HelmRelease install fails and the suite is expected to fail fast: the specs
-run in an `Ordered` container, so everything after the install spec is skipped. Do not wire it into a required check before #4340
-lands. Only the first behaviour is implemented, the rest are pending (`PIt`).
+run in an `Ordered` container, so everything after the install spec is skipped.
+Do not wire it into a required check before #4340 lands. Only the first behaviour is implemented, the rest are pending (`PIt`).
 
 ## Layout
 

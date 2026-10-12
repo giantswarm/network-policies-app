@@ -16,6 +16,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	cr "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -111,7 +112,7 @@ func ensureNamespace(ctx context.Context, wcClient *client.Client, name string, 
 // ensureProbePod makes sure the namespace holds a Ready pod that the
 // reachability helpers can exec into.
 func ensureProbePod(ctx context.Context, wcClient *client.Client, namespace string) {
-	ensurePod(ctx, wcClient, namespace, probePodName, []string{"sleep", "99999999"})
+	ensurePod(ctx, wcClient, namespace, probePodName, []string{"sleep", "99999999"}, 0)
 }
 
 // ensureListenerPod makes sure the namespace holds a Ready pod serving a
@@ -120,8 +121,19 @@ func ensureProbePod(ctx context.Context, wcClient *client.Client, namespace stri
 // persistent busybox nc (-k) that runs a response script per connection
 // (-e must come last).
 func ensureListenerPod(ctx context.Context, wcClient *client.Client, namespace string) probeTarget {
-	script := fmt.Sprintf(`printf '#!/bin/sh\nprintf "HTTP/1.0 200 OK\\r\\nContent-Length: 3\\r\\n\\r\\nok\\n"\n' > /tmp/r.sh; chmod 755 /tmp/r.sh; exec nc -lk -p %d -e /tmp/r.sh`, listenerPort)
-	ensurePod(ctx, wcClient, namespace, listenerPodName, []string{"sh", "-c", script})
+	// The response script drains the request headers before answering:
+	// closing a socket with unread data makes Linux send RST, which wget
+	// reports as an error instead of a response.
+	script := fmt.Sprintf(`cat > /tmp/r.sh <<'EOF'
+#!/bin/sh
+while IFS= read -r l; do
+  [ "${#l}" -le 1 ] && break
+done
+printf 'HTTP/1.0 200 OK\r\nContent-Length: 3\r\n\r\nok\n'
+EOF
+chmod 755 /tmp/r.sh
+exec nc -lk -p %d -e /tmp/r.sh`, listenerPort)
+	ensurePod(ctx, wcClient, namespace, listenerPodName, []string{"sh", "-c", script}, listenerPort)
 
 	pod := &corev1.Pod{}
 	Expect(wcClient.Get(ctx, cr.ObjectKey{Namespace: namespace, Name: listenerPodName}, pod)).To(Succeed())
@@ -130,7 +142,9 @@ func ensureListenerPod(ctx context.Context, wcClient *client.Client, namespace s
 	return probeTarget{Host: pod.Status.PodIP, Port: listenerPort}
 }
 
-func ensurePod(ctx context.Context, wcClient *client.Client, namespace, name string, args []string) {
+// ensurePod creates the pod if needed and waits for it to be Ready. A non-zero
+// readinessPort adds a TCP readiness probe, so Ready means the port is bound.
+func ensurePod(ctx context.Context, wcClient *client.Client, namespace, name string, args []string, readinessPort int) {
 	nonRoot := true
 	allowPrivilegeEscalation := false
 	userAndGroup := int64(35)
@@ -157,6 +171,14 @@ func ensurePod(ctx context.Context, wcClient *client.Client, namespace, name str
 	}
 
 	pod.Labels = map[string]string{ownerLabelKey: ownerLabelValue}
+	if readinessPort != 0 {
+		pod.Spec.Containers[0].ReadinessProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(int32(readinessPort))},
+			},
+			PeriodSeconds: 2,
+		}
+	}
 
 	recreateUnhealthyPod(ctx, wcClient, pod)
 

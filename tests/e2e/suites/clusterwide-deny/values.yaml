@@ -1,0 +1,6 @@
+# Enables the clusterwide deny (default-deny-all-namespaces CCNP). The DNS
+# allow stays at its default (off) so the suite can assert the shipped
+# behaviour. The suite that turns it on is a pending case in the suite file.
+denyByDefault:
+  clusterWide:
+    enabled: true

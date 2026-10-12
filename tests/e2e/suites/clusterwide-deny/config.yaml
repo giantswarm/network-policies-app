@@ -1,0 +1,9 @@
+# Takes priority over ../../config.yaml for this suite only, so this suite has
+# its own provider list while the basic suite keeps its own.
+appName: network-policies
+repoName: network-policies-app
+appCatalog: cluster
+# Widens to all providers, AKS included, once giantswarm/roadmap#4340 lands
+# (PRD rung 1). Until then the suite is red everywhere, so run it on one.
+providers:
+- capa

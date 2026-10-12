@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add the `clusterwide-deny` E2E test suite scaffold.
+
 ## [0.3.2] - 2026-09-29
 
 ### Changed

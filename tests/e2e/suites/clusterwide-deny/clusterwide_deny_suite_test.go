@@ -135,8 +135,14 @@ func TestClusterwideDeny(t *testing.T) {
 			})
 		}).
 		AfterSuite(func() {
+			cluster := state.GetCluster()
+			if cluster == nil {
+				logger.Log("Skipping namespace cleanup, no cluster in state")
+				return
+			}
+
 			ctx := state.GetContext()
-			wcClient, err := state.GetFramework().WC(state.GetCluster().Name)
+			wcClient, err := state.GetFramework().WC(cluster.Name)
 			if err != nil {
 				// The workload cluster is about to be deleted anyway.
 				logger.Log("Skipping namespace cleanup, no workload cluster client: %s", err)

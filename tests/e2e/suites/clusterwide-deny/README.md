@@ -25,5 +25,5 @@ lands. Only the first behaviour is implemented, the rest are pending (`PIt`).
 
 ## Running
 
-Same as the `basic` suite. `/run app-test-suites-single PROVIDER=aks TARGET_SUITES=clusterwide-deny`
+Same as the `basic` suite. `/run app-test-suites-single PROVIDER=capa TARGET_SUITES=clusterwide-deny`
 on a PR runs just this suite on one provider.

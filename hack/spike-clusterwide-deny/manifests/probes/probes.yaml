@@ -1,0 +1,323 @@
+# Probe workloads for run-checklist.sh. All objects carry spike.giantswarm.io/owner=default-deny-netpol so that
+# cleanup only ever deletes what this kit created. Image can be overridden with SPIKE_IMAGE.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ddn-spike-a
+  labels:
+    spike.giantswarm.io/owner: default-deny-netpol
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: client
+  namespace: ddn-spike-a
+  labels:
+    app: client
+    spike.giantswarm.io/owner: default-deny-netpol
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: client
+      image: nicolaka/netshoot:v0.13
+      command: ["sleep", "infinity"]
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        seccompProfile:
+          type: RuntimeDefault
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: server
+  namespace: ddn-spike-a
+  labels:
+    app: server
+    spike.giantswarm.io/owner: default-deny-netpol
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: server
+      image: nicolaka/netshoot:v0.13
+      # Answers every TCP connection on 8080 with a minimal HTTP 200. `head -n 1` drains the request first so that closing the
+      # socket does not make the kernel send an RST while unread request bytes are pending (curl exit 56 / 52 false alarms).
+      command: ["socat", "TCP-LISTEN:8080,fork,reuseaddr", "SYSTEM:head -n 1 >/dev/null; echo HTTP/1.0 200 OK; echo; echo ok"]
+      ports:
+        - containerPort: 8080
+      # kubelet probes originate from the node (host entity) and must keep working under the clusterwide deny.
+      readinessProbe:
+        tcpSocket:
+          port: 8080
+        periodSeconds: 5
+      livenessProbe:
+        tcpSocket:
+          port: 8080
+        periodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        seccompProfile:
+          type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: server
+  namespace: ddn-spike-a
+  labels:
+    spike.giantswarm.io/owner: default-deny-netpol
+spec:
+  selector:
+    app: server
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ddn-spike-b
+  labels:
+    spike.giantswarm.io/owner: default-deny-netpol
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: client
+  namespace: ddn-spike-b
+  labels:
+    app: client
+    spike.giantswarm.io/owner: default-deny-netpol
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: client
+      image: nicolaka/netshoot:v0.13
+      command: ["sleep", "infinity"]
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        seccompProfile:
+          type: RuntimeDefault
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: server
+  namespace: ddn-spike-b
+  labels:
+    app: server
+    spike.giantswarm.io/owner: default-deny-netpol
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: server
+      image: nicolaka/netshoot:v0.13
+      # Answers every TCP connection on 8080 with a minimal HTTP 200. `head -n 1` drains the request first so that closing the
+      # socket does not make the kernel send an RST while unread request bytes are pending (curl exit 56 / 52 false alarms).
+      command: ["socat", "TCP-LISTEN:8080,fork,reuseaddr", "SYSTEM:head -n 1 >/dev/null; echo HTTP/1.0 200 OK; echo; echo ok"]
+      ports:
+        - containerPort: 8080
+      # kubelet probes originate from the node (host entity) and must keep working under the clusterwide deny.
+      readinessProbe:
+        tcpSocket:
+          port: 8080
+        periodSeconds: 5
+      livenessProbe:
+        tcpSocket:
+          port: 8080
+        periodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        seccompProfile:
+          type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: server
+  namespace: ddn-spike-b
+  labels:
+    spike.giantswarm.io/owner: default-deny-netpol
+spec:
+  selector:
+    app: server
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ddn-spike-optout
+  labels:
+    spike.giantswarm.io/owner: default-deny-netpol
+    policy.giantswarm.io/default-deny: "false"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: client
+  namespace: ddn-spike-optout
+  labels:
+    app: client
+    spike.giantswarm.io/owner: default-deny-netpol
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: client
+      image: nicolaka/netshoot:v0.13
+      command: ["sleep", "infinity"]
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        seccompProfile:
+          type: RuntimeDefault
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: server
+  namespace: ddn-spike-optout
+  labels:
+    app: server
+    spike.giantswarm.io/owner: default-deny-netpol
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: server
+      image: nicolaka/netshoot:v0.13
+      # Answers every TCP connection on 8080 with a minimal HTTP 200. `head -n 1` drains the request first so that closing the
+      # socket does not make the kernel send an RST while unread request bytes are pending (curl exit 56 / 52 false alarms).
+      command: ["socat", "TCP-LISTEN:8080,fork,reuseaddr", "SYSTEM:head -n 1 >/dev/null; echo HTTP/1.0 200 OK; echo; echo ok"]
+      ports:
+        - containerPort: 8080
+      # kubelet probes originate from the node (host entity) and must keep working under the clusterwide deny.
+      readinessProbe:
+        tcpSocket:
+          port: 8080
+        periodSeconds: 5
+      livenessProbe:
+        tcpSocket:
+          port: 8080
+        periodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        seccompProfile:
+          type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: server
+  namespace: ddn-spike-optout
+  labels:
+    spike.giantswarm.io/owner: default-deny-netpol
+spec:
+  selector:
+    app: server
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ddn-spike-all
+  labels:
+    spike.giantswarm.io/owner: default-deny-netpol
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: client
+  namespace: ddn-spike-all
+  labels:
+    app: client
+    spike.giantswarm.io/owner: default-deny-netpol
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: client
+      image: nicolaka/netshoot:v0.13
+      command: ["sleep", "infinity"]
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        seccompProfile:
+          type: RuntimeDefault
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: server
+  namespace: ddn-spike-all
+  labels:
+    app: server
+    spike.giantswarm.io/owner: default-deny-netpol
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: server
+      image: nicolaka/netshoot:v0.13
+      # Answers every TCP connection on 8080 with a minimal HTTP 200. `head -n 1` drains the request first so that closing the
+      # socket does not make the kernel send an RST while unread request bytes are pending (curl exit 56 / 52 false alarms).
+      command: ["socat", "TCP-LISTEN:8080,fork,reuseaddr", "SYSTEM:head -n 1 >/dev/null; echo HTTP/1.0 200 OK; echo; echo ok"]
+      ports:
+        - containerPort: 8080
+      # kubelet probes originate from the node (host entity) and must keep working under the clusterwide deny.
+      readinessProbe:
+        tcpSocket:
+          port: 8080
+        periodSeconds: 5
+      livenessProbe:
+        tcpSocket:
+          port: 8080
+        periodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        seccompProfile:
+          type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: server
+  namespace: ddn-spike-all
+  labels:
+    spike.giantswarm.io/owner: default-deny-netpol
+spec:
+  selector:
+    app: server
+  ports:
+    - port: 8080
+      targetPort: 8080

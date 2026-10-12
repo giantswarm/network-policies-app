@@ -1,0 +1,98 @@
+# Sources
+
+Evidence for every non-obvious field in `manifests/`. Paths are relative to a directory of shallow clones of the upstream repos
+(kyverno, kyverno/api, cilium, network-policies-app (this repo), kyverno-app, security-bundle, coredns-app); the kit was
+written against clones in the cabbage-plans `default-deny-netpol/.agents_source/` directory. Kyverno is checked out at tag `v1.18.2` (`945ac9ce8546`), the version Giant Swarm deploys.
+Cilium is `main` (`c57b662efd03`), so Cilium field names are checked against upstream HEAD, not against the Cilium
+version of a given cluster.
+
+## Which Kyverno Giant Swarm deploys
+
+| Fact | Evidence |
+|---|---|
+| security-bundle pins `kyverno` app `0.25.0` and `kyverno-crds` `1.18.0` | `security-bundle/helm/security-bundle/values.yaml:104-125` (kyverno, `version: 0.25.0` at :125), `:127-136` (kyverno-crds) |
+| `kyverno-app` 0.25.0 "Updated `kyverno` to upstream version `v1.18.2`" | `kyverno-app/CHANGELOG.md:31-43` |
+| chart `appVersion: v1.18.2`, subchart `kyverno` 3.8.2 | `kyverno-app/helm/kyverno/Chart.yaml:2-12` (current kyverno-app is 0.25.2: `:35`) |
+| Kyverno CRDs are installed by `kyverno-crds`, not by the kyverno chart | `kyverno-app/helm/kyverno/values.yaml:26-27` (`crds.install: false`), `security-bundle/.../values.yaml:127-136` |
+| kyverno-app ships its own CiliumNetworkPolicies (`ciliumNetworkPolicy.enabled: true`) | `kyverno-app/helm/kyverno/values.yaml:9-10`, `kyverno-app/helm/kyverno/templates/kyverno-cilium/ciliumnetworkpolicy.yaml` |
+| That chart's CNP `allow-kyverno-admission-controller-talk-to-apiserver` selects `app.kubernetes.io/component: admission-controller` and allows **ingress** from the `kube-apiserver` and `remote-node` entities on 443/6443/9443 (the webhook path); this is what the preflight looks for so that the API server can reach Kyverno under the deny | `kyverno-app/helm/kyverno/templates/kyverno-cilium/ciliumnetworkpolicy.yaml` (third policy of the file) |
+
+Not verified: that `kyverno-crds` 1.18.0 contains the `policies.kyverno.io` GeneratingPolicy CRD (it is the Kyverno
+1.18 CRD bundle, and `run-checklist.sh` preflight prints the served versions from the live cluster).
+
+## GeneratingPolicy (Kyverno v1.18.2)
+
+| Field / behavior | Evidence |
+|---|---|
+| group `policies.kyverno.io`, kind GeneratingPolicy, cluster scoped | `kyverno/cmd/cli/kubectl-kyverno/data/crds/policies.kyverno.io_generatingpolicies.yaml:9,19` |
+| versions `v1` (:25), `v1alpha1` (:641), `v1beta1` (:1256) all served; **`v1beta1` is the storage version** (:1864) | same file |
+| conformance tests and the CLI tests use `policies.kyverno.io/v1beta1` | `kyverno/test/conformance/chainsaw/generating-policies/data/sync/match-namespace-with-ns-selector/policy.yaml:1` |
+| `spec.evaluation.synchronize.enabled`, `spec.evaluation.generateExisting.enabled` (default false), `orphanDownstreamOnPolicyDelete` | CRD `:1281-1332` |
+| `spec.matchConstraints.resourceRules` (apiGroups/apiVersions/operations/resources), `spec.variables[]{name,expression}`, `spec.generate[]{expression}` | CRD `:1333`, `:1401`, `:1736`; example `test/conformance/chainsaw/generating-policies/existing/basic-generate-data/policy.yaml` |
+| Namespace as trigger, `generator.apply(<ns>, <list>)`, `dyn()` around nested literals | `test/conformance/chainsaw/generating-policies/existing/basic-generate-data/policy.yaml`, `test/cli/test-generating-policy/foreach/data-generate-networkpolicy/policy.yaml` |
+| `generator.apply(string, list(map))` returns `true`, so `cond ? generator.apply(...) : true` is a valid generation expression | `sdk/extensions/cel/libs/generator/impl.go:15-33` (`kyverno/sdk`, version pinned at `kyverno/go.mod:43`) |
+| generation expressions are evaluated for side effects only; the result value is unused | `kyverno/pkg/cel/policies/gpol/compiler/policy.go:99-105` |
+| **Annotation removal deletes the CNP** relies on: UPDATE with synchronize enabled creates an UpdateRequest with `Synchronize=true`; the controller first deletes all downstreams of the trigger, then regenerates only if the policy still produces resources | `kyverno/pkg/webhooks/resource/gpol/handler.go:115-125`, `kyverno/pkg/background/gpol/generate_controller.go:87-93` |
+| **GeneratingPolicy match conditions DO reach the webhook, and the webhook operations are forced.** The webhook controller builds `ValidatingWebhook`s per policy: a policy with valid `matchConditions`, `matchPolicy: Exact` or a timeout becomes a *fine-grained* webhook that carries its `MatchConditions`; any other policy (the kit's six) goes into the shared *basic* `-ignore`/`-fail` webhook. For a GeneratingPolicy the rule operations are overwritten with CREATE, UPDATE, DELETE and CONNECT, whatever `matchConstraints.resourceRules[].operations` says. `matchConstraints.namespaceSelector` and `objectSelector` are merged with Kyverno's global webhook selectors and set on the webhook, **but in the basic path the one shared `-ignore` webhook gets the selectors of whichever policy the loop sees last, and the loop order is the informer's list order (`controller.go:1433-1443`, only policies with `AdmissionEnabled()`), i.e. not deterministic: a selector on any policy can therefore silently restrict the events that every other basic-path GeneratingPolicy receives. The kit therefore sets NO `objectSelector`/`namespaceSelector` on its six policies (an earlier revision did) and filters on the owner label in CEL only.** The API server evaluates webhook `matchConditions` with `object` and `oldObject`, so the earlier README claim "match conditions see the new object only" was wrong for the API server side. | `kyverno/pkg/controllers/webhook/validating.go:22-75` (fine-grained path, forced operations at `:62-75`), `:138-159` (selectors, fine-grained), `:196-211` (selectors, basic path, last policy wins), `:270-282` (forced operations, basic path); webhook built for GeneratingPolicies at `kyverno/pkg/controllers/webhook/controller.go:1233-1249` (`gpols`, name `gpol.validate.kyverno.svc`, `kyverno/pkg/config/config.go:63`). Kubernetes `matchConditions` variables (`object`, `oldObject`, `request`): upstream Kubernetes documentation, not in the clones. |
+| **GeneratingPolicy failurePolicy is hard-coded `Ignore`:** the `GetFailurePolicy` of `GeneratingPolicy` ignores its argument and returns Ignore; the CRD has no `failurePolicy` field (only `webhookConfiguration.timeoutSeconds`). Consequently every GeneratingPolicy ends up in the `-ignore` webhook. Under the deny an unreachable webhook therefore does not block Namespace writes (it times out, default 10 s, and the request goes on) but nothing is generated. | `kyverno/api` module at `7b64bcf` (the version pinned in `kyverno/go.mod:38`, cloned as `api`): `api/policies.kyverno.io/v1beta1/generating_policy.go:60-62`; CRD `policies.kyverno.io_generatingpolicies.yaml` (v1beta1 `webhookConfiguration`, no `failurePolicy`) |
+| Kyverno's own policy/exception/cleanup webhooks are `failurePolicy: Fail` (hard-coded) but only match Kyverno CRDs, so they must not trip the scale-down guard; the resource webhooks follow the policies' own failure policy | `kyverno/pkg/controllers/webhook/controller.go:799,865,912` (`FailurePolicy: &fail`); the guard in `run-checklist.sh` (`kyverno_blocking_webhooks`) only counts non-Ignore webhooks whose rules name Namespaces, Deployments(/scale) or `*` |
+| **Untraced / inference, not verified in the source:** whether the UpdateRequest is created for UPDATEs that change nothing relevant (this is what `flap` measures). | `run-checklist.sh ac5`, `flap`, `restart` |
+| **Synchronize regenerates on every trigger UPDATE:** an UpdateRequest with `Synchronize=true` first calls `DeleteDownstreams` for the trigger, then re-applies; `DeleteDownstreams` deletes every downstream of that policy whose trigger-UID label matches, via the API (not a patch) | `kyverno/pkg/background/gpol/generate_controller.go:87-93`, `kyverno/pkg/background/gpol/dynamic_watcher.go:210-248`; measured by `run-checklist.sh flap`. Whether the UpdateRequest is created for UPDATEs that change nothing relevant was not traced. |
+| `status.conditionStatus.ready` (boolean) and `status.conditionStatus.conditions[]` are the status fields in the storage version `v1beta1`; there is no top-level `status.conditions`, so `kubectl wait --for=condition=Ready` can never succeed. The script waits with `--for=jsonpath='{.status.conditionStatus.ready}'=true`. (`v1`: `:556,:622`; `v1alpha1`: `:1172,:1238`) | `kyverno/cmd/cli/kubectl-kyverno/data/crds/policies.kyverno.io_generatingpolicies.yaml:1787` (`conditionStatus`), `:1853` (`ready`). Not verified: that the Kyverno controllers actually populate `ready` for GeneratingPolicies (the script only warns if the wait times out). |
+| Kyverno-managed webhook configurations carry the label `webhook.kyverno.io/managed-by=kyverno`; the script lists them to refuse scaling Kyverno down when one has `failurePolicy` other than `Ignore` | `kyverno/api/kyverno/constants.go:10`, `kyverno/pkg/controllers/webhook/utils.go:117-120` |
+| Kyverno deployments carry `app.kubernetes.io/component=<name>` (`background-controller`) and `app.kubernetes.io/part-of=kyverno` | `kyverno/charts/kyverno/templates/_helpers/_labels.tpl:37-39`, `kyverno/charts/kyverno/templates/background-controller/_helpers.tpl:18` (`part-of` is the chart's `kyverno.fullname`, `kyverno` by default (`_labels.tpl:33`); if a release overrides the fullname the script finds no deployments and says so instead of scaling anything) |
+| generate-existing runs when the policy itself is created/updated (lists all existing triggers and creates an UpdateRequest), not on a Kyverno restart as such | `kyverno/pkg/policy/policy_controller.go:446-452`, `kyverno/pkg/policy/gpol.go:59-80` |
+| Background controller ClusterRole aggregates every ClusterRole labeled `rbac.kyverno.io/aggregate-to-background-controller: "true"` | `kyverno/charts/kyverno/templates/background-controller/clusterrole.yaml:9-14` |
+
+Not verified from source (spike answers): whether Kyverno, when it is down while a namespace is annotated, picks the
+trigger up on restart (`ac5b`, opt-in); whether `has(object.metadata.annotations) && "k" in ...` evaluates as intended
+in the policy engine (it is plain CEL, but no upstream test uses it); the UpdateRequest volume of 6 policies x every
+Namespace UPDATE on a busy cluster.
+
+## Cilium
+
+| Field / behavior | Evidence |
+|---|---|
+| namespace labels are exposed as endpoint labels `io.cilium.k8s.namespace.labels.<label-key>` | `cilium/pkg/k8s/apis/cilium.io/const.go:37-42`, `cilium/Documentation/security/policy/kubernetes.rst:104-113` |
+| usable in selectors of CNP and CCNP | same docs (`kubernetes.rst:106-109`); working precedent in network-policies-app: `network-policies-app/helm/network-policies-app/templates/cilium/deny-egress-to-imds.yaml:13-27` (CCNP `endpointSelector.matchExpressions` with `io.cilium.k8s.namespace.labels.<key>` `NotIn`) |
+| `NotIn` also matches endpoints whose namespace lacks the label | Kubernetes selector semantics, relied on by the IMDS precedent above; `run-checklist.sh same-ns` and `ac1` verify it live |
+| `ingress: [{}]` / `egress: [{}]` = empty rule that enables default deny without allowing anything | existing policy `network-policies-app/helm/network-policies-app/templates/cilium/deny-all.yaml:9-13`; semantics `cilium/pkg/policy/api/rule.go:122-139` |
+| entities `kube-apiserver`, `remote-node` (also `host`, `cluster`, `world`) | `cilium/pkg/policy/api/entity.go:58,67` |
+| `endpointSelector` of a CCNP is cluster wide, a CNP's is bound to its own namespace; `fromEndpoints`/`toEndpoints` with `io.kubernetes.pod.namespace` select other namespaces | `cilium/Documentation/security/policy/kubernetes.rst:110-118`, `network-policies-app/.../allow-dns.yaml:11-20` |
+| `cilium-dbg bpf policy get --all` dumps every endpoint policy map ("Endpoint ID:" header, rows start with `Allow`/`Deny`); `-n` skips identity lookups | `cilium/cilium-dbg/cmd/bpf_policy_get.go:36-53,56-92,155-190` |
+| `cilium-dbg endpoint list -o jsonpath` syntax; CiliumEndpoint `status.id` | `cilium/Documentation/cheatsheet.rst:71-73`, `cilium/Documentation/security/policy-creation.rst:90` |
+| policy map size flag `--bpf-policy-map-max`, default 16384 per endpoint (docs); hard compile-time upper bound `1<<16` | `cilium/Documentation/cmdref/cilium-agent.md:68`, `cilium/pkg/option/config.go:531-532` |
+
+The PRD says cilium-app raises `bpf.policyMapMax` to 65536; the script reads the real value from `cm/cilium-config`
+key `bpf-policy-map-max` instead of assuming it. Not verified: the ConfigMap key name on AKS-managed Cilium.
+
+## CoreDNS ingress (what lets DNS work under the deny)
+
+The clusterwide deny selects every endpoint of `kube-system`, CoreDNS included, with an empty ingress rule. Nothing in
+this kit allows ingress to CoreDNS: the six standard allows and the DNS allows are egress or other ingress. In the Giant
+Swarm stack the allow comes from **coredns-app**, which renders a Kubernetes `NetworkPolicy` named after the app
+(`name: coredns`, `namespace: kube-system`) selecting `k8s-app: coredns` with ingress on the DNS ports (`ports.dns.targetPort`
+and `ports.dns.port`, UDP and TCP) and on the metrics port from any source, plus `egress: [{}]`:
+`coredns-app/helm/coredns-app/templates/np.yaml:1-27` (clone at `f3d76c8`, default branch; `values.yaml:2,4` set
+`name: coredns`, `namespace: kube-system`). Cilium enforces Kubernetes NetworkPolicies together with CNP/CCNP and unions
+their allows, so that policy keeps CoreDNS reachable. Not in the cloned repos: the node-local DNS cache
+(`k8s-dns-node-cache`) ingress allow; nothing was found for it, so the preflight prints a confirmation request when
+those pods exist. The preflight heuristic (`coredns_ingress_candidates`) lists NetworkPolicies and CNPs in `kube-system`
+and all non-kit CCNPs whose selector mentions CoreDNS / kube-dns / node-cache or is `{}` and that have a non-empty
+ingress; it is text matching on `kubectl -o jsonpath` output, not a policy evaluator, hence the override
+`SPIKE_ALLOW_NO_COREDNS_INGRESS=true`.
+
+## DNS targets
+
+Copied verbatim from `network-policies-app/helm/network-policies-app/templates/cilium/allow-dns.yaml:11-30`:
+`k8s-app` = `coredns`, `k8s-dns-node-cache`, `kube-dns` (AKS) in `kube-system`; ports 1053 and 53, UDP and TCP.
+The template adds `rules.dns: [{matchPattern: "*"}]` only if `allowEgressToProxy.enabled` (`:31-35`); the spike
+manifests are L4 only, matching the PRD.
+
+## Values taken from elsewhere (provisional)
+
+| Value | Source |
+|---|---|
+| metrics-scraping source = alloy-metrics in `kube-system`, label `app.kubernetes.io/instance: alloy-metrics` | `giantswarm/observability-bundle` `helm/observability-bundle/values.yaml` (`alloyMetrics`, `namespace: kube-system`), and giantswarm/mcp-prometheus `ciliumNetworkPolicy.ingress.metricsScrapers`. Provisional: confirm with the observability team, the PRD says only "GS monitoring agents". |
+| ingress-controller source = namespace `envoy-gateway-system` | PRD / glossary |
+| webhook ports `443,4443,8443,9443,10250` | assumption: common admission webhook ports, not in the PRD; the PRD says "webhook ports" without a list |

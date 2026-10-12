@@ -1,0 +1,44 @@
+# Kit copy of the PRD policy "allow-dns-all-namespaces". Renamed ddn-spike-* so that the kit never touches a real policy.
+# Clusterwide DNS allow (PRD "DNS allow"): same endpoint selector as the clusterwide deny, same targets and
+# ports as the per-namespace default-allow-dns of network-policies-app
+# (helm/network-policies-app/templates/cilium/allow-dns.yaml): CoreDNS, node-local DNS cache, kube-dns (AKS).
+# L4 only. network-policies-app adds `rules.dns: [{matchPattern: "*"}]` only when allowEgressToProxy.enabled;
+# see the commented block below and run-checklist.sh ac7 for the L7 interaction test.
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: ddn-spike-allow-dns-all-namespaces
+  labels:
+    spike.giantswarm.io/owner: default-deny-netpol
+spec:
+  description: "Spike: DNS egress for every namespace not carrying the namespace opt-out."
+  endpointSelector:
+    matchExpressions:
+      - key: io.cilium.k8s.namespace.labels.policy.giantswarm.io/default-deny
+        operator: NotIn
+        values:
+          - "false"
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: coredns
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: k8s-dns-node-cache
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns # Used in AKS
+      toPorts:
+        - ports:
+            - port: "1053"
+              protocol: UDP
+            - port: "1053"
+              protocol: TCP
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          # rules:
+          #   dns:
+          #     - matchPattern: "*"

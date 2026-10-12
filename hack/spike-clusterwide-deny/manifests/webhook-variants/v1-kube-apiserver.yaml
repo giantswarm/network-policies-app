@@ -1,0 +1,18 @@
+# Candidate webhook-ingress source, ordered narrowest first. run-checklist.sh ac6 applies one at a time to
+# ddn-spike-webhook and checks whether the API server's connection reaches the listener.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ddn-spike-webhook-ingress
+  namespace: ddn-spike-webhook
+  labels:
+    spike.giantswarm.io/owner: default-deny-netpol
+spec:
+  endpointSelector: {}
+  ingress:
+    - fromEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "8443"
+              protocol: TCP

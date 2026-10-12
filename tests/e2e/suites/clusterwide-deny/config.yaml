@@ -1,0 +1,13 @@
+# Takes priority over ../../config.yaml for this suite only, so the clusterwide
+# deny runs on every provider while the basic suite keeps its own list.
+appName: network-policies
+repoName: network-policies-app
+appCatalog: cluster
+providers:
+- capa
+- eks
+- capz
+- aks
+- capv
+- capvcd
+- capmox

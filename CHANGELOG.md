@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add `allowEgressToUpstreamDNS` to allow pods with `dnsPolicy: Default` to reach upstream DNS resolvers.
+- Add `azureWorkloadIdentityWebhook` to allow the AKS workload identity webhook through the default deny.
+
 ## [0.3.2] - 2026-09-29
 
 ### Changed

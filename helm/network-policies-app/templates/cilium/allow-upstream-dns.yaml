@@ -1,0 +1,25 @@
+{{- if .Values.allowEgressToUpstreamDNS.enabled }}
+{{- if not .Values.allowEgressToUpstreamDNS.cidrs }}
+{{- fail "allowEgressToUpstreamDNS.cidrs must not be empty for allowEgressToUpstreamDNS.enabled=true" }}
+{{- end }}
+{{- range .Values.allowEgressToUpstreamDNS.namespaces }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-upstream-dns
+  namespace: {{ . }}
+spec:
+  description: "Allow pods with dnsPolicy Default to reach the upstream DNS resolvers of the node."
+  endpointSelector: {}
+  egress:
+    - toCIDR:
+        {{- toYaml $.Values.allowEgressToUpstreamDNS.cidrs | nindent 8 }}
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+---
+{{- end }}
+{{- end }}

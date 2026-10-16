@@ -135,9 +135,9 @@ allowEgressToUpstreamDNS:
 ### azureWorkloadIdentityWebhook
 
 Allows the AKS-managed workload identity webhook in `kube-system` to reach the API server,
-and the API server to call the webhook. On AKS those calls arrive through the
-`hostNetwork` Konnectivity agent, so they are allowed from the `host` and `remote-node`
-entities.
+and the API server to call the webhook. On AKS those calls arrive through the Konnectivity
+agent, which runs with `hostNetwork` on BYO CNI clusters and as a regular pod otherwise, so
+both are allowed.
 
 ## Compatibility
 

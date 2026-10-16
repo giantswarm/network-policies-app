@@ -5,7 +5,7 @@ metadata:
   name: allow-azure-workload-identity-webhook
   namespace: kube-system
 spec:
-  description: "Allow the AKS workload identity webhook to reach the API server, and the API server to call the webhook through the hostNetwork Konnectivity agent."
+  description: "Allow the AKS workload identity webhook to reach the API server, and the API server to call the webhook through the Konnectivity agent."
   endpointSelector:
     matchLabels:
       azure-workload-identity.io/system: "true"
@@ -17,9 +17,18 @@ spec:
             - port: "443"
               protocol: TCP
   ingress:
+    # The Konnectivity agent runs with hostNetwork on BYO CNI clusters and as a regular pod otherwise.
     - fromEntities:
         - host
         - remote-node
+      toPorts:
+        - ports:
+            - port: "9443"
+              protocol: TCP
+    - fromEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            app: konnectivity-agent
       toPorts:
         - ports:
             - port: "9443"

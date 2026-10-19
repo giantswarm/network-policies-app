@@ -24,6 +24,12 @@
               "allowEgressToProxy": {
                   "$ref": "#/definitions/ProxyPolicy"
               },
+              "allowEgressToUpstreamDNS": {
+                  "$ref": "#/definitions/UpstreamDNSPolicy"
+              },
+              "azureWorkloadIdentityWebhook": {
+                  "$ref": "#/definitions/Toggle"
+              },
               "kamaji": {
                   "$ref": "#/definitions/Policy"
               },
@@ -62,6 +68,40 @@
               "namespaces"
           ],
           "title": "Policy"
+      },
+      "Toggle": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+              "enabled": {
+                  "type": "boolean"
+              }
+          },
+          "required": [
+              "enabled"
+          ],
+          "title": "Toggle"
+      },
+      "UpstreamDNSPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+              "enabled": {
+                  "type": "boolean"
+              },
+              "namespaces": {
+                  "type": "array"
+              },
+              "cidrs": {
+                  "type": "array"
+              }
+          },
+          "required": [
+              "enabled",
+              "namespaces",
+              "cidrs"
+          ],
+          "title": "UpstreamDNSPolicy"
       },
       "IMDSPolicy": {
           "type": "object",

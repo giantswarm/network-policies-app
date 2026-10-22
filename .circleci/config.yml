@@ -12,7 +12,7 @@ workflows:
         name: package and push network-policies-app chart
         app_catalog: cluster-catalog
         app_catalog_test: cluster-test-catalog
-        chart: network-policies-app
+        chart: network-policies
         filters:
             # Trigger job on git tag.
           tags:

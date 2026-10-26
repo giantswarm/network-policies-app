@@ -34,6 +34,9 @@ allowEgressToUpstreamDNS:
 azureWorkloadIdentityWebhook:
   enabled: false
 
+hubbleRelay:
+  enabled: false
+
 # deprecated: use konnectivityAgent instead
 kamaji:
   enabled: false

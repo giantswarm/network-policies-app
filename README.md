@@ -139,6 +139,12 @@ and the API server to call the webhook. On AKS those calls arrive through the Ko
 agent, which runs with `hostNetwork` on BYO CNI clusters and as a regular pod otherwise, so
 both are allowed.
 
+### hubbleRelay
+
+Allows `hubble-relay` in `kube-system`, deployed by AKS with Advanced Container Networking
+Services observability, to reach the Hubble servers in the `hostNetwork` Cilium agents on
+port `4244`, and allows port-forwards to the relay on port `4245`.
+
 ## Compatibility
 
 This app has been tested to work with the following workload cluster release versions:

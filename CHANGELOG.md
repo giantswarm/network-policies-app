@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add `hubbleRelay` to allow the AKS ACNS `hubble-relay` through the default deny.
+
 ### Changed
 
 - Move the chart to `helm/network-policies` to match its name, in preparation for devctl-generated CI.

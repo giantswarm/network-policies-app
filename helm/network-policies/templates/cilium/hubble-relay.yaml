@@ -1,0 +1,29 @@
+{{- if .Values.hubbleRelay.enabled }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-hubble-relay
+  namespace: kube-system
+spec:
+  description: "Allow hubble-relay to reach the Hubble servers in the Cilium agents, and clients on the node to reach hubble-relay."
+  endpointSelector:
+    matchLabels:
+      k8s-app: hubble-relay
+  egress:
+    # The Hubble servers run in the hostNetwork Cilium agents, reached directly and through the hubble-peer service.
+    - toEntities:
+        - host
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "4244"
+              protocol: TCP
+  ingress:
+    # Port-forward through the kubelet.
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "4245"
+              protocol: TCP
+{{- end }}

@@ -292,6 +292,14 @@ eventually() { # timeout interval cmd...
   done
 }
 
+# The CEL generator function is generator.apply() in Kyverno >= 1.18 and generator.Apply() in 1.17
+# (pkg/cel/libs/generator/lib.go). The manifests use the 1.18 spelling; preflight picks the one the
+# cluster's Kyverno understands. SPIKE_GEN_FN overrides it.
+GEN_FN="${SPIKE_GEN_FN:-apply}"
+apply_gpol() { # file
+  sed "s/generator\.apply(/generator.${GEN_FN}(/g" "$1" | K apply -f - >/dev/null
+}
+
 apply_manifest() { # file
   if [ "$IMAGE" != "$IMAGE_DEFAULT" ]; then
     sed "s|${IMAGE_DEFAULT}|${IMAGE}|g" "$1" | K apply -f - >/dev/null
@@ -744,6 +752,12 @@ preflight() {
     echo "WARNING: GeneratingPolicy CRD missing (kyverno-crds / security-bundle not installed): generate checks will be MANUAL"
   fi
   echo "kyverno image(s): $(K -n kyverno get deploy -o jsonpath='{range .items[*]}{.spec.template.spec.containers[0].image}{" "}{end}' 2>/dev/null)"
+  if [ -z "${SPIKE_GEN_FN:-}" ]; then
+    kyv_minor="$(K -n kyverno get deploy -o jsonpath='{range .items[*]}{.spec.template.spec.containers[0].image}{"\n"}{end}' 2>/dev/null \
+      | sed -n 's|.*/kyverno:v1\.\([0-9][0-9]*\)\..*|\1|p' | head -n 1)"
+    if [ -n "$kyv_minor" ] && [ "$kyv_minor" -lt 18 ]; then GEN_FN=Apply; fi
+    echo "kyverno minor version: ${kyv_minor:-unknown} -> CEL generator.${GEN_FN}() (override with SPIKE_GEN_FN)"
+  fi
   echo "kyverno CiliumNetworkPolicies: $(K -n kyverno get "$CNP" -o name 2>/dev/null | tr '\n' ' ')"
 
   foreign="$(foreign_objects)"
@@ -840,7 +854,7 @@ setup() {
   if [ "$HAVE_GPOL" = 1 ]; then
     echo "== applying Kyverno RBAC + GeneratingPolicies"
     K apply -f "$M/kyverno-rbac-ciliumnetworkpolicies.yaml" >/dev/null || { echo "applying the Kyverno RBAC failed" >&2; return 1; }
-    for f in "$M"/generatingpolicies/*.yaml; do K apply -f "$f" >/dev/null || { echo "apply failed: $f" >&2; return 1; }; done
+    for f in "$M"/generatingpolicies/*.yaml; do apply_gpol "$f" || { echo "apply failed: $f" >&2; return 1; }; done
     for a in $GEN_ANNOTATIONS; do
       K wait --for=jsonpath='{.status.conditionStatus.ready}'=true "$GPOL/$(gname "$a")" --timeout=60s >/dev/null 2>&1 \
         || echo "WARNING: GeneratingPolicy $(gname "$a") not ready yet: $(K get "$GPOL" "$(gname "$a")" -o jsonpath='{.status.conditionStatus.message}' 2>/dev/null)"
@@ -1126,7 +1140,7 @@ ac5b_generate_existing() {
     1) ev "no CNP while the policy is absent" ;;
     *) fail_op "cannot check for the CNP: $P_DETAIL" ;;
   esac
-  K apply -f "$M/generatingpolicies/generatingpolicy-${a}.yaml" >/dev/null || fail_op "re-applying the GeneratingPolicy failed"
+  apply_gpol "$M/generatingpolicies/generatingpolicy-${a}.yaml" || fail_op "re-applying the GeneratingPolicy failed"
   step "policy (re)created -> CNP generated for the already annotated namespace after @T@s" "policy (re)created but CNP NOT generated within ${SYNC_TIMEOUT}s" eventually "$SYNC_TIMEOUT" 2 cnp_exists "$NS_B" "$n"
   unannotate "$NS_B" "$a"
   eventually "$SYNC_TIMEOUT" 2 cnp_gone "$NS_B" "$n" || true

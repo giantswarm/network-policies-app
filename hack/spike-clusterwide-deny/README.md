@@ -31,6 +31,12 @@ Versions found: **Giant Swarm deploys Kyverno v1.18.2** (security-bundle pins `k
 as **`apiVersion: policies.kyverno.io/v1beta1`** (storage version; `v1` and `v1alpha1` are also served). Details in
 `SOURCES.md`.
 
+Released clusters can still run Kyverno 1.17: AWS release 36.1.0 ships security-bundle 2.4.0 with kyverno-app 0.24.2
+(Kyverno v1.17.2, `kyverno-crds` 1.17.0). 1.17 serves the same `v1beta1` fields the kit uses, but its CEL generator
+function is `generator.Apply()`, renamed to `generator.apply()` in 1.18 (`pkg/cel/libs/generator/lib.go`). The manifests
+use the 1.18 spelling; preflight reads the Kyverno image tag and rewrites it for 1.17 when applying. Override with
+`SPIKE_GEN_FN=Apply|apply`.
+
 ## Design notes that differ from a naive reading of the PRD
 
 - **The annotation check lives in a policy variable, not in `matchConditions`.** Kyverno does put a GeneratingPolicy's

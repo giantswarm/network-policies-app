@@ -311,15 +311,42 @@ esac
 case "$GPOL_TIMEOUT" in
   ''|*[!0-9]*) echo "SPIKE_GPOL_TIMEOUT must be a number of seconds (1-30), got: $GPOL_TIMEOUT" >&2; exit 2 ;;
 esac
-apply_gpol() { # file
+GPOL_TIMEOUT=$((10#$GPOL_TIMEOUT))   # no leading zeros (YAML would read 010 as octal)
+if [ "$GPOL_TIMEOUT" -lt 1 ] || [ "$GPOL_TIMEOUT" -gt 30 ]; then
+  echo "SPIKE_GPOL_TIMEOUT must be 1-30 (Kubernetes webhook timeout range), got: $GPOL_TIMEOUT" >&2; exit 2
+fi
+# SPIKE_GPOL_MATCHCOND=owner adds a matchConditions entry that lets only namespaces carrying the kit owner label
+# (in object or oldObject, so DELETE and label-keeping annotation removal still pass) reach Kyverno. It also makes
+# the policy fine-grained (validating.go:22-34). Default: none (as shipped). Combines with SPIKE_GPOL_WEBHOOK.
+GPOL_MATCHCOND="${SPIKE_GPOL_MATCHCOND:-none}"
+case "$GPOL_MATCHCOND" in
+  none|owner) ;;
+  *) echo "SPIKE_GPOL_MATCHCOND must be none or owner, got: $GPOL_MATCHCOND" >&2; exit 2 ;;
+esac
+gpol_spec_insert() { # prints the lines to insert directly under spec: (may be empty)
   if [ "$GPOL_WEBHOOK" = finegrained ]; then
-    sed -e "s/generator\.apply(/generator.${GEN_FN}(/g" \
-        -e "s/^spec:\$/spec:\\
-  webhookConfiguration:\\
-    timeoutSeconds: ${GPOL_TIMEOUT}/" "$1" | K apply -f - >/dev/null
-  else
-    sed "s/generator\.apply(/generator.${GEN_FN}(/g" "$1" | K apply -f - >/dev/null
+    printf '  webhookConfiguration:\n    timeoutSeconds: %s\n' "$GPOL_TIMEOUT"
   fi
+  if [ "$GPOL_MATCHCOND" = owner ]; then
+    cat <<'MC'
+  matchConditions:
+    - name: kit-owner-only
+      expression: >-
+        (object != null && has(object.metadata.labels) &&
+        "spike.giantswarm.io/owner" in object.metadata.labels &&
+        object.metadata.labels["spike.giantswarm.io/owner"] == "default-deny-netpol") ||
+        (oldObject != null && has(oldObject.metadata.labels) &&
+        "spike.giantswarm.io/owner" in oldObject.metadata.labels &&
+        oldObject.metadata.labels["spike.giantswarm.io/owner"] == "default-deny-netpol")
+MC
+  fi
+}
+apply_gpol() { # file
+  local ins
+  ins="$(gpol_spec_insert)"
+  sed "s/generator\.apply(/generator.${GEN_FN}(/g" "$1" \
+    | INS="$ins" awk '{ print } /^spec:$/ && ENVIRON["INS"] != "" { print ENVIRON["INS"] }' \
+    | K apply -f - >/dev/null
 }
 
 apply_manifest() { # file
@@ -1067,7 +1094,7 @@ setup() {
       K wait --for=jsonpath='{.status.conditionStatus.ready}'=true "$GPOL/$(gname "$a")" --timeout=60s >/dev/null 2>&1 \
         || echo "WARNING: GeneratingPolicy $(gname "$a") not ready yet: $(K get "$GPOL" "$(gname "$a")" -o jsonpath='{.status.conditionStatus.message}' 2>/dev/null)"
     done
-    echo "GeneratingPolicy webhook mode: ${GPOL_WEBHOOK}; gpol webhooks now: $(K get validatingwebhookconfigurations -o jsonpath='{range .items[*].webhooks[*]}{.name}{"\n"}{end}' 2>/dev/null | grep '^gpol\.' | tr '\n' ' ')"
+    echo "GeneratingPolicy webhook mode: ${GPOL_WEBHOOK}, matchConditions: ${GPOL_MATCHCOND}; gpol webhooks now: $(K get validatingwebhookconfigurations -o jsonpath='{range .items[*].webhooks[*]}{.name}{"\n"}{end}' 2>/dev/null | grep '^gpol\.' | tr '\n' ' ')"
   fi
   echo "== applying the clusterwide deny (${DENY_NAME})"
   DENY_APPLIED=1

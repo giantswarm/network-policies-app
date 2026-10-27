@@ -42,7 +42,15 @@ Webhook mode: by default the six kit GeneratingPolicies have no `matchConditions
 (`SPIKE_GPOL_TIMEOUT`, default 10) so each policy gets its own fine-grained webhook
 (`pkg/controllers/webhook/validating.go:22-34`). On the first CAPA run (Kyverno 1.17.2) allows generated through the
 shared webhook were deleted ~60s later without regeneration, while a control policy on its own webhook kept its
-downstream; run the generation checks in both modes to compare. Preflight prints the gpol webhooks it sees.
+downstream; run the generation checks in both modes to compare. Setup prints a snapshot of the gpol webhooks right
+after applying the policies (Kyverno may not have reconciled them yet). `SPIKE_GPOL_TIMEOUT` must be 1-30 (Kubernetes
+webhook range). Fine-grained mode is not a one-variable change: it also sets an explicit timeout and emits only an
+`-ignore-finegrained-<policy>` webhook (no `-fail` variant).
+
+`SPIKE_GPOL_MATCHCOND=owner` adds a `matchConditions` entry so only namespaces carrying the kit owner label (in
+`object` or `oldObject`) reach Kyverno; it also makes the policies fine-grained. On the CAPA cluster (Kyverno 1.17.2)
+`SPIKE_GPOL_WEBHOOK=finegrained` alone did not stop the delayed deletion in `bulk`, while a control policy restricted
+by `matchConditions` kept its downstream for 4 minutes; this option tests that difference.
 
 ## Design notes that differ from a naive reading of the PRD
 

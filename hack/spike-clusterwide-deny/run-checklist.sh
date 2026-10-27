@@ -309,12 +309,12 @@ case "$GPOL_WEBHOOK" in
   *) echo "SPIKE_GPOL_WEBHOOK must be shared or finegrained, got: $GPOL_WEBHOOK" >&2; exit 2 ;;
 esac
 case "$GPOL_TIMEOUT" in
-  ''|*[!0-9]*) echo "SPIKE_GPOL_TIMEOUT must be a number of seconds (1-30), got: $GPOL_TIMEOUT" >&2; exit 2 ;;
+  *[!0-9]*) echo "SPIKE_GPOL_TIMEOUT must be a number of seconds (1-30), got: $GPOL_TIMEOUT" >&2; exit 2 ;;
 esac
-GPOL_TIMEOUT=$((10#$GPOL_TIMEOUT))   # no leading zeros (YAML would read 010 as octal)
-if [ "$GPOL_TIMEOUT" -lt 1 ] || [ "$GPOL_TIMEOUT" -gt 30 ]; then
+if [ "${#GPOL_TIMEOUT}" -gt 3 ] || [ "$((10#$GPOL_TIMEOUT))" -lt 1 ] || [ "$((10#$GPOL_TIMEOUT))" -gt 30 ]; then
   echo "SPIKE_GPOL_TIMEOUT must be 1-30 (Kubernetes webhook timeout range), got: $GPOL_TIMEOUT" >&2; exit 2
 fi
+GPOL_TIMEOUT=$((10#$GPOL_TIMEOUT))   # no leading zeros (YAML would read 010 as octal)
 # SPIKE_GPOL_MATCHCOND=owner adds a matchConditions entry that lets only namespaces carrying the kit owner label
 # (in object or oldObject, so DELETE and label-keeping annotation removal still pass) reach Kyverno. It also makes
 # the policy fine-grained (validating.go:22-34). Default: none (as shipped). Combines with SPIKE_GPOL_WEBHOOK.
@@ -332,12 +332,9 @@ gpol_spec_insert() { # prints the lines to insert directly under spec: (may be e
   matchConditions:
     - name: kit-owner-only
       expression: >-
-        (object != null && has(object.metadata.labels) &&
-        "spike.giantswarm.io/owner" in object.metadata.labels &&
-        object.metadata.labels["spike.giantswarm.io/owner"] == "default-deny-netpol") ||
-        (oldObject != null && has(oldObject.metadata.labels) &&
-        "spike.giantswarm.io/owner" in oldObject.metadata.labels &&
-        oldObject.metadata.labels["spike.giantswarm.io/owner"] == "default-deny-netpol")
+        [object, oldObject].exists(o, o != null && has(o.metadata) && has(o.metadata.labels) &&
+        "spike.giantswarm.io/owner" in o.metadata.labels &&
+        o.metadata.labels["spike.giantswarm.io/owner"] == "default-deny-netpol")
 MC
   fi
 }
@@ -1003,7 +1000,8 @@ preflight() {
       fg="$(echo "$fg" | grep '/')"   # only resource names, never kubectl warning lines
       if [ -n "$fg" ]; then
         echo "WARNING: GeneratingPolicies NOT created by the kit exist on this cluster: $(echo "$fg" | sed 's|.*/||' | tr '\n' ' ')" >&2
-        echo "         Policies without matchConditions share one basic-path webhook (gpol.validate.kyverno.svc-ignore) with the kit's six;" >&2
+        echo "         Policies without matchConditions share one basic-path webhook (gpol.validate.kyverno.svc-ignore); in the default mode" >&2
+        echo "         (SPIKE_GPOL_WEBHOOK=shared, SPIKE_GPOL_MATCHCOND=none) the kit's six use it too;" >&2
         echo "         the kit sets no selector on it, so those policies only ever see MORE Namespace events, never fewer (SOURCES.md)." >&2
       fi
     else

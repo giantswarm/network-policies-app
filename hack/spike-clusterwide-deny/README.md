@@ -47,8 +47,10 @@ after applying the policies (Kyverno may not have reconciled them yet). `SPIKE_G
 webhook range). Fine-grained mode is not a one-variable change: it also sets an explicit timeout and emits only an
 `-ignore-finegrained-<policy>` webhook (no `-fail` variant).
 
-`SPIKE_GPOL_MATCHCOND=owner` adds a `matchConditions` entry so only namespaces carrying the kit owner label (in
-`object` or `oldObject`) reach Kyverno; it also makes the policies fine-grained. On the CAPA cluster (Kyverno 1.17.2)
+`SPIKE_GPOL_MATCHCOND=owner` adds a `matchConditions` entry so the API server only sends admission requests for
+namespaces carrying the kit owner label (in `object` or `oldObject`). Kyverno re-evaluates `matchConditions` in its
+background controller (generate-existing, update requests), where an absent object is `{}` rather than null, so the
+expression guards with `has(o.metadata)` (`[object, oldObject].exists(...)`). The option it also makes the policies fine-grained. On the CAPA cluster (Kyverno 1.17.2)
 `SPIKE_GPOL_WEBHOOK=finegrained` alone did not stop the delayed deletion in `bulk`, while a control policy restricted
 by `matchConditions` kept its downstream for 4 minutes; this option tests that difference.
 
@@ -59,9 +61,10 @@ by `matchConditions` kept its downstream for 4 minutes; this option tests that d
   `object` and `oldObject` available, so a condition such as "new or old object carries an allow annotation" would let
   annotation removal through. The kit does not rely on that: the test is a policy variable evaluated by Kyverno, so the
   UPDATE that *removes* the annotation always reaches it, synchronization first deletes the trigger's downstreams, and
-  nothing is regenerated. `ac5` proves this live. Using a `matchCondition` to cut the webhook volume is an optimisation
-  worth its own spike (see `SOURCES.md`, which also marks which parts are traced and which are inference).
-- **The kit sets NO selector on the Namespace webhook, on purpose.** The six GeneratingPolicies register a cluster-wide
+  nothing is regenerated. `ac5` proves this live. `SPIKE_GPOL_MATCHCOND=owner` tests a `matchCondition` (see "Webhook mode"); `SOURCES.md` marks which parts are
+  traced and which are inference.
+- **The kit sets NO selector on the Namespace webhook, on purpose** (default mode; `SPIKE_GPOL_WEBHOOK=finegrained` or
+  `SPIKE_GPOL_MATCHCOND=owner` move the six onto their own webhooks). The six GeneratingPolicies register a cluster-wide
   webhook on Namespaces. GeneratingPolicies without `matchConditions`/`matchPolicy`/timeout all go into ONE shared
   webhook (`gpol.validate.kyverno.svc-ignore`) whose `namespaceSelector`/`objectSelector` are overwritten per policy in
   informer order, so the last policy listed wins (`pkg/controllers/webhook/validating.go:196-211`, policies listed at

@@ -299,8 +299,27 @@ eventually() { # timeout interval cmd...
 # (pkg/cel/libs/generator/lib.go). The manifests use the 1.18 spelling; preflight picks the one the
 # cluster's Kyverno understands. SPIKE_GEN_FN overrides it.
 GEN_FN="${SPIKE_GEN_FN:-apply}"
+# SPIKE_GPOL_WEBHOOK=finegrained gives every kit GeneratingPolicy its own admission webhook instead of the shared
+# basic-path gpol.validate.kyverno.svc-ignore: a policy with webhookConfiguration.timeoutSeconds is fine-grained
+# (kyverno pkg/controllers/webhook/validating.go:22-34, v1.17.0 and v1.18.2). Default: shared (as shipped).
+GPOL_WEBHOOK="${SPIKE_GPOL_WEBHOOK:-shared}"
+GPOL_TIMEOUT="${SPIKE_GPOL_TIMEOUT:-10}"
+case "$GPOL_WEBHOOK" in
+  shared|finegrained) ;;
+  *) echo "SPIKE_GPOL_WEBHOOK must be shared or finegrained, got: $GPOL_WEBHOOK" >&2; exit 2 ;;
+esac
+case "$GPOL_TIMEOUT" in
+  ''|*[!0-9]*) echo "SPIKE_GPOL_TIMEOUT must be a number of seconds (1-30), got: $GPOL_TIMEOUT" >&2; exit 2 ;;
+esac
 apply_gpol() { # file
-  sed "s/generator\.apply(/generator.${GEN_FN}(/g" "$1" | K apply -f - >/dev/null
+  if [ "$GPOL_WEBHOOK" = finegrained ]; then
+    sed -e "s/generator\.apply(/generator.${GEN_FN}(/g" \
+        -e "s/^spec:\$/spec:\\
+  webhookConfiguration:\\
+    timeoutSeconds: ${GPOL_TIMEOUT}/" "$1" | K apply -f - >/dev/null
+  else
+    sed "s/generator\.apply(/generator.${GEN_FN}(/g" "$1" | K apply -f - >/dev/null
+  fi
 }
 
 apply_manifest() { # file
@@ -1048,6 +1067,7 @@ setup() {
       K wait --for=jsonpath='{.status.conditionStatus.ready}'=true "$GPOL/$(gname "$a")" --timeout=60s >/dev/null 2>&1 \
         || echo "WARNING: GeneratingPolicy $(gname "$a") not ready yet: $(K get "$GPOL" "$(gname "$a")" -o jsonpath='{.status.conditionStatus.message}' 2>/dev/null)"
     done
+    echo "GeneratingPolicy webhook mode: ${GPOL_WEBHOOK}; gpol webhooks now: $(K get validatingwebhookconfigurations -o jsonpath='{range .items[*].webhooks[*]}{.name}{"\n"}{end}' 2>/dev/null | grep '^gpol\.' | tr '\n' ' ')"
   fi
   echo "== applying the clusterwide deny (${DENY_NAME})"
   DENY_APPLIED=1

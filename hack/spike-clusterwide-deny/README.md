@@ -37,6 +37,13 @@ function is `generator.Apply()`, renamed to `generator.apply()` in 1.18 (`pkg/ce
 use the 1.18 spelling; preflight reads the Kyverno image tag and rewrites it for 1.17 when applying. Override with
 `SPIKE_GEN_FN=Apply|apply`.
 
+Webhook mode: by default the six kit GeneratingPolicies have no `matchConditions` and share Kyverno's basic-path webhook
+`gpol.validate.kyverno.svc-ignore`. `SPIKE_GPOL_WEBHOOK=finegrained` adds `webhookConfiguration.timeoutSeconds`
+(`SPIKE_GPOL_TIMEOUT`, default 10) so each policy gets its own fine-grained webhook
+(`pkg/controllers/webhook/validating.go:22-34`). On the first CAPA run (Kyverno 1.17.2) allows generated through the
+shared webhook were deleted ~60s later without regeneration, while a control policy on its own webhook kept its
+downstream; run the generation checks in both modes to compare. Preflight prints the gpol webhooks it sees.
+
 ## Design notes that differ from a naive reading of the PRD
 
 - **The annotation check lives in a policy variable, not in `matchConditions`.** Kyverno does put a GeneratingPolicy's

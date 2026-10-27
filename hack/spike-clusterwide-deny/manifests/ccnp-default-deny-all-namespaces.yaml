@@ -3,6 +3,8 @@
 # Selects every endpoint except those in a namespace labeled policy.giantswarm.io/default-deny: "false"
 # (the namespace opt-out). NotIn also matches namespaces that do not carry the label at all, so
 # unlabeled namespaces are denied. Same selector pattern as deny-egress-to-imds in network-policies-app.
+# The Cilium health endpoint (`reserved:health`, one per node) is excluded with a second matchExpression
+# (`reserved:health` DoesNotExist), otherwise Cilium cluster health probing is cut by the deny.
 # `ingress: [{}]` / `egress: [{}]` is the same empty rule today's per-namespace default-deny-all uses:
 # it allows nothing and only switches the endpoint into default-deny for that direction.
 # WARNING: this denies ALL traffic of ALL namespaces (kube-system and giantswarm included) on the cluster.
@@ -20,6 +22,12 @@ spec:
         operator: NotIn
         values:
           - "false"
+      # Exclude the Cilium health endpoint: it carries only `reserved:health` and no namespace labels, so the NotIn
+      # above selects it, and the empty ingress/egress rule then cut cluster-health probing (first real run: Cluster
+      # health 3/7, 1/6). The `reserved:` source is kept as written by Cilium's selector sanitizer. Keep this
+      # expression identical in the deny and in the DNS allow. See SOURCES.md "Cilium health endpoint".
+      - key: reserved:health
+        operator: DoesNotExist
   ingress:
     - {}
   egress:

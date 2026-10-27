@@ -39,6 +39,7 @@ DROP_WINDOW="${SPIKE_DROP_WINDOW:-30}"
 SYNC_TIMEOUT="${SPIKE_SYNC_TIMEOUT:-90}"
 FLIP_TIMEOUT="${SPIKE_FLIP_TIMEOUT:-60}"
 FLAP_SECONDS="${SPIKE_FLAP_SECONDS:-60}"
+BULK_SAMPLES="${SPIKE_BULK_SAMPLES:-5 60 150 240}"   # seconds after the bulk annotation at which the `bulk` check counts the CNPs
 CURL_TIMEOUT=3
 SETTLE="${SPIKE_SETTLE:-6}"
 
@@ -47,6 +48,8 @@ NS_B=${KIT}-b
 NS_OPTOUT=${KIT}-optout
 NS_ALL=${KIT}-all
 NS_WEBHOOK=${KIT}-webhook
+NS_BULK=${KIT}-bulk   # created and deleted by the `bulk` check itself: always fresh
+NS_SEQ=${KIT}-seq     # one-by-one control of the `bulk` check
 OPTOUT_LABEL="policy.giantswarm.io/default-deny"
 
 # Kit object names (all ddn-spike-*): one place, used by setup, preflight, checks and cleanup.
@@ -77,7 +80,7 @@ gname() { echo "${KIT}-$1"; } # annotation -> GeneratingPolicy name AND generate
 
 # One source for the checks: name:function, in run order. `list`, --only validation and the driver derive from it.
 CHECKS="same-ns:same_ns_denied_unannotated ac1:ac1_optout_live_flip ac2:ac2_probes_hostnetwork ac3:ac3_aks_support \
-dns:ac_dns apiserver:ac_apiserver ac5:ac5_generate_sync ac5b:ac5b_generate_existing flap:ac_flap restart:ac_restart \
+dns:ac_dns apiserver:ac_apiserver ac5:ac5_generate_sync ac5b:ac5b_generate_existing flap:ac_flap bulk:ac_bulk restart:ac_restart \
 ac6:ac6_webhook_ingress ac7:ac7_l7_dns_interaction ac4:ac4_bpf_map_usage ac8:ac8_drops_gs_namespaces ac9:ac9_record_guidance"
 fn_for() { local c; for c in $CHECKS; do [ "${c%%:*}" = "$1" ] && { echo "${c#*:}"; return 0; }; done; return 1; }
 all_checks() { local c out=""; for c in $CHECKS; do out="${out:+$out,}${c%%:*}"; done; echo "$out"; }
@@ -106,7 +109,7 @@ actually be used (resolved with --kubeconfig/--context honoured, printed by the 
   SPIKE_CONFIRM=my-test-wc $0 --context my-test-wc run
 
 Environment: SPIKE_IMAGE, SPIKE_PAUSE_IMAGE, SPIKE_CLUSTER_DOMAIN, SPIKE_EXTERNAL_URL, SPIKE_LOAD_PODS,
-SPIKE_DROP_WINDOW, SPIKE_SYNC_TIMEOUT, SPIKE_FLIP_TIMEOUT, SPIKE_FLAP_SECONDS, SPIKE_SETTLE,
+SPIKE_DROP_WINDOW, SPIKE_SYNC_TIMEOUT, SPIKE_FLIP_TIMEOUT, SPIKE_FLAP_SECONDS, SPIKE_BULK_SAMPLES ("5 60 150 240"), SPIKE_SETTLE,
 SPIKE_ALLOW_KYVERNO_SCALE=true (opt in to the "Kyverno down" generate-existing test: scales ALL Kyverno
 deployments to 0; refused when a Kyverno webhook has failurePolicy Fail unless SPIKE_KYVERNO_SCALE_ALLOW_FAIL_CLOSED=true),
 SPIKE_SKIP_KYVERNO_RESTART=true (skip the background-controller restart check),
@@ -362,7 +365,16 @@ ccnp_gone() { gone "$CCNP" "$1"; }
 
 # Label/annotation writes check kubectl's exit code; a failure is recorded as an ERROR in the current check.
 annotate() { K annotate namespace "$1" "policy.giantswarm.io/$2=true" --overwrite >/dev/null || { fail_op "annotating namespace $1 with $2 FAILED"; return 1; }; }
-annotate_all() { local a; for a in $GEN_ANNOTATIONS; do annotate "$1" "$a" || return 1; done; }
+# One annotation per request, 2 s apart (SPIKE_ANNOTATE_GAP): what a controller adding the annotations one at a time does.
+# flap and ac4 use this, so they test what they claim; the Kyverno 1.17 bulk-annotation behaviour is isolated in `bulk`.
+annotate_each() { local a; for a in $GEN_ANNOTATIONS; do annotate "$1" "$a" || return 1; sleep "${SPIKE_ANNOTATE_GAP:-2}"; done; }
+# All six annotations in ONE request = ONE Namespace UPDATE (first real run: Kyverno 1.17 generated all six, then deleted
+# all six ~2 min later without regenerating them).
+annotate_bulk() { # ns
+  local a args=()
+  for a in $GEN_ANNOTATIONS; do args+=("policy.giantswarm.io/$a=true"); done
+  K annotate namespace "$1" "${args[@]}" --overwrite >/dev/null || { fail_op "annotating namespace $1 with all six annotations in one request FAILED"; return 1; }
+}
 unannotate() { K annotate namespace "$1" "policy.giantswarm.io/$2-" >/dev/null || { fail_op "removing annotation $2 from namespace $1 FAILED"; return 1; }; }
 unannotate_all() { # ns: one request, so one Namespace UPDATE
   local a args=()
@@ -371,6 +383,58 @@ unannotate_all() { # ns: one request, so one Namespace UPDATE
 }
 set_optout() { K label namespace "$1" "${OPTOUT_LABEL}=false" --overwrite >/dev/null || { fail_op "setting the opt-out label on $1 FAILED"; return 1; }; }
 unset_optout() { K label namespace "$1" "${OPTOUT_LABEL}-" >/dev/null || { fail_op "removing the opt-out label from $1 FAILED"; return 1; }; }
+
+# ---- generated vs generated-then-deleted --------------------------------------------------------------
+# GEN_SEEN records "ns/name@second" for every kit allow that was seen to exist during the current check, so a later
+# absence can be told apart from "never generated" (a kit/Kyverno setup problem) and reported as "generated-then-deleted"
+# (the Kyverno 1.17 behaviour of the first real run).
+GEN_SEEN=""
+gen_seen_reset() { GEN_SEEN=""; }
+await_generated() { # ns annotation -> 0 generated (and recorded), else the last rc of the poll (1 absent, 2 error)
+  local n rc; n="$(gname "$2")"
+  eventually "$SYNC_TIMEOUT" 2 cnp_exists "$1" "$n"; rc=$?
+  [ "$rc" -eq 0 ] && GEN_SEEN="$GEN_SEEN $1/$n@$SECONDS"
+  return "$rc"
+}
+lost_allows() { # ns -> prints "name(seen +Ts ago)" for allows seen earlier in this check that are absent now; return 0 when any is lost
+  local tok key t nsn found=1 out=""
+  for tok in $GEN_SEEN; do
+    key="${tok%@*}"; t="${tok#*@}"
+    [ "${key%%/*}" = "$1" ] || continue
+    nsn="${key#*/}"
+    if cnp_exists "$1" "$nsn"; then :; else
+      [ "$?" -eq 1 ] && { out="$out ${nsn}(seen $((SECONDS - t))s ago)"; found=0; }
+    fi
+  done
+  echo "${out# }"
+  return "$found"
+}
+count_allows() { K -n "$1" get "$CNP" -o name 2>/dev/null | grep -c "/${KIT}-allow-" || true; }
+names_allows() { K -n "$1" get "$CNP" -o name 2>/dev/null | grep "/${KIT}-allow-" | sed "s|.*/${KIT}-allow-||" | sort | tr '\n' ',' | sed 's/,$//'; }
+
+# ---- Kyverno UpdateRequests and background-controller log, as evidence ---------------------------------
+# UpdateRequests (kyverno.io, namespaced in `kyverno`) are what the admission webhook hands to the background controller.
+ur_count() { # -> number, or ? when they cannot be listed
+  local out
+  out="$(K -n kyverno get updaterequests.kyverno.io -o name 2>&1)" || { echo "?"; return 0; }
+  printf '%s\n' "$out" | grep -c '/' || true
+}
+ur_dump() { # file label: append the current UpdateRequests (name policy state resource) to the evidence file
+  {
+    echo "--- UpdateRequests in kyverno ($2) at $(date +%H:%M:%S)"
+    K -n kyverno get updaterequests.kyverno.io \
+      -o jsonpath='{range .items[*]}{.metadata.name}{" policy="}{.spec.policy}{" type="}{.spec.requestType}{" state="}{.status.state}{" resource="}{.spec.resource.kind}{"/"}{.spec.resource.namespace}{"/"}{.spec.resource.name}{" created="}{.metadata.creationTimestamp}{"\n"}{end}' 2>&1
+  } >> "$1"
+}
+# background-controller log lines of the last $3 seconds that mention $2 (the policy name or the kit prefix), appended to $1.
+# Echoes the number of matching lines. --tail=-1 because kubectl defaults to 10 lines when a selector is used.
+bgc_log_hits() { # file pattern seconds
+  local out n
+  out="$(K -n kyverno logs -l app.kubernetes.io/component=background-controller --tail=-1 --since="${3}s" --prefix 2>&1)" || { echo "--- background-controller logs unreadable: $(echo "$out" | head -n1)" >> "$1"; echo "?"; return 0; }
+  n="$(printf '%s\n' "$out" | grep -cF -- "$2" || true)"
+  { echo "--- background-controller log lines matching '$2' in the last ${3}s: ${n}"; printf '%s\n' "$out" | grep -F -- "$2" | tail -n 40; } >> "$1"
+  echo "$n"
+}
 
 # ---- the one reachability helper -------------------------------------------------------------------
 # expect_reach / expect_blocked CLIENT_NS TARGET   (TARGET = namespace of a `server` pod, or a full URL)
@@ -450,6 +514,57 @@ expect_dns_blocked() { # ns [pod]: needs an explicit timeout; refused/servfail/e
 # ---- cilium agent exec ------------------------------------------------------------------------------
 agent_pods() { K -n kube-system get pods -l k8s-app=cilium -o jsonpath='{range .items[*]}{.metadata.name} {.status.hostIP}{"\n"}{end}' 2>/dev/null; }
 first_agent() { agent_pods | head -n1 | cut -d' ' -f1; }
+agent_on_node() { # node name -> the cilium agent pod running on that node (empty when none)
+  K -n kube-system get pods -l k8s-app=cilium --field-selector "spec.nodeName=$1" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | head -n1
+}
+# `cilium-dbg status` "Cluster health: N/M reachable" of one agent -> prints "N M" (nothing when it cannot be read).
+# The output is captured first and parsed afterwards: no early-closing pipe reader.
+cluster_health_of() { # agent pod
+  local out line
+  out="$(agent_exec "$1" status)" || return 1
+  line="$(printf '%s\n' "$out" | grep -i 'cluster health' | head -n1)"
+  printf '%s\n' "$line" | sed -n 's/.*[Cc]luster health:[[:space:]]*\([0-9][0-9]*\)\/\([0-9][0-9]*\).*/\1 \2/p'
+}
+# Does an identity block of `cilium-dbg identity list [--endpoints]` output carry BOTH the pod-namespace label of $2 AND the
+# namespace opt-out label? Output format (cilium pkg/identity/cache/cache.go:36-55 FormatIdentities, labels printed as
+# `<source>:<key>[=<value>]` sorted, pkg/labels/labels.go:469-474; --endpoints adds a REFCOUNT column on the first line,
+# pkg/identity/identitymanager/manager.go:244-263):
+#   ID      LABELS
+#   12345   k8s:app=client
+#           k8s:io.cilium.k8s.namespace.labels.policy.giantswarm.io/default-deny=false
+#           k8s:io.kubernetes.pod.namespace=ddn-spike-a
+# A block starts at a line whose first field is a number; the following lines belong to it. Namespace labels are part of
+# the default identity label set (pkg/labelsfilter/filter.go:229), so the label shows up as
+# `k8s:io.cilium.k8s.namespace.labels.<namespace label key>=<value>`.
+identity_carries_optout() { # file namespace
+  awk -v ns="$2" -v opt="io.cilium.k8s.namespace.labels.${OPTOUT_LABEL}=false" '
+    function flush() { if (hasns && hasopt) found = 1; hasns = 0; hasopt = 0 }
+    { lab = $1
+      if ($1 ~ /^[0-9]+$/ && NF >= 2) { flush(); lab = $2 }
+      sub(/^[^:=]+:/, "", lab)          # drop the label source (k8s:, reserved:, ...)
+      if (lab == "io.kubernetes.pod.namespace=" ns) hasns = 1
+      if (lab == opt) hasopt = 1 }
+    END { flush(); exit !found }' "$1"
+}
+AC1_ID_FILE=""; AC1_ID_MODE=""
+# 0 = found; 1 = identities were read but none carries both labels; 2 = no identity output could be read.
+# The agent output is captured into a variable and written to the evidence file BEFORE it is searched. (The first real run
+# piped `agent_exec ... | grep -q`; with `set -o pipefail` an early-closing grep can fail the whole pipeline when the exec'd
+# command is still writing, which reads as "label not found". Whether that happened there cannot be proven offline.)
+ac1_read_identity() { # agent
+  local ag="$1" out mode rc=2
+  : > "$AC1_ID_FILE"
+  for mode in "identity list --endpoints" "identity list"; do
+    # shellcheck disable=SC2086 # mode is intentionally word-split
+    out="$(agent_exec "$ag" $mode)" || continue
+    [ -n "$out" ] || continue
+    { echo "### $ag: cilium-dbg $mode"; printf '%s\n' "$out"; } >> "$AC1_ID_FILE"
+    rc=1
+    if printf '%s\n' "$out" > "$AC1_ID_FILE.cur" && identity_carries_optout "$AC1_ID_FILE.cur" "$NS_A"; then AC1_ID_MODE="$mode"; rm -f "$AC1_ID_FILE.cur"; return 0; fi
+  done
+  rm -f "$AC1_ID_FILE.cur"
+  return $rc
+}
 # The single place that knows how to reach the cilium CLI in an agent pod (cilium-dbg with/without -c, old `cilium`).
 # AGENT_TIMEOUT=N bounds both the in-container command (timeout N) and the local kubectl exec, so nothing outlives N s.
 agent_exec() { # pod args...
@@ -658,7 +773,7 @@ foreign_objects() {
   }
   chk "$CCNP" "$DENY_NAME"; chk "$CCNP" "$DNS_ALLOW_NAME"
   chk "$CROLE" "$RBAC_NAME"; chk "$VWC" "$WEBHOOK_CFG"
-  for ns in "$NS_A" "$NS_B" "$NS_OPTOUT" "$NS_ALL" "$NS_WEBHOOK"; do chk namespaces "$ns"; done
+  for ns in "$NS_A" "$NS_B" "$NS_OPTOUT" "$NS_ALL" "$NS_WEBHOOK" "$NS_BULK" "$NS_SEQ"; do chk namespaces "$ns"; done
   chk configmaps "$KYV_CM" kyverno
   chk pods "$DNS_PROBE_POD" kube-system; chk pods "$DNS_PROBE_POD" giantswarm
   for a in $GEN_ANNOTATIONS; do chk "$GPOL" "$(gname "$a")"; done
@@ -674,21 +789,83 @@ policy_lines() { # namespace(or "") ; stdout
   fi
   K get "$CCNP" -l "!${OWNER_KEY}" -o jsonpath="${f/SEL/endpointSelector}" 2>/dev/null | grep -v '|\[{}\]$' | sed 's/^/CiliumClusterwideNetworkPolicy\//'
 }
+# ---- parsing the JSON that `kubectl -o jsonpath='{.spec.ingress}'` prints --------------------------------------------------
+# awk helpers shared by the two candidate finders below. A policy's ingress is a JSON array of rule objects; each rule is
+# examined ON ITS OWN, so a rule's source and its ports always stay together (a CNP rule with several toPorts entries holds
+# `]},{` inside it, which a text split on that sequence would cut in the middle).
+#   split_rules(s, rules)  splits a top-level JSON array into its object elements (string- and nesting-aware), returns the count
+#   ports_state(x, want, named)  1 = the rule's ports cover a wanted port (or the rule has no port restriction),
+#                                0 = they do not, 2 = a named port (`"port":"https"`) could not be resolved and nothing else covers
+#   `want` is a space separated list of port numbers; `named` is "name=containerPort name=containerPort ..." read from the target
+#   pods, so a named port is resolved against the container ports of the pod the policy is meant for.
+AWK_JSON_LIB='
+function split_rules(s, rules,   i, c, depth, instr, esc, start, n) {
+  n = 0; depth = 0; instr = 0; esc = 0; start = 0
+  for (i = 1; i <= length(s); i++) {
+    c = substr(s, i, 1)
+    if (instr) { if (esc) esc = 0; else if (c == "\\") esc = 1; else if (c == "\"") instr = 0; continue }
+    if (c == "\"") { instr = 1; continue }
+    if (c == "[" || c == "{") { depth++; if (depth == 2 && c == "{") start = i; continue }
+    if (c == "]" || c == "}") { if (depth == 2 && c == "}") rules[++n] = substr(s, start, i - start + 1); depth--; continue }
+  }
+  return n
+}
+function port_cover(x, want, named,   o, v, e, lo, hi, res, k, w, nw, ws, nt, toks, parts, found) {
+  res = 0; nw = split(want, ws, " "); nt = split(named, toks, " ")
+  while (match(x, /\{[^{}]*"port":[^{}]*\}/)) {
+    o = substr(x, RSTART, RLENGTH); x = substr(x, RSTART + RLENGTH)
+    if (!match(o, /"port":("[^"]*"|[0-9]+)/)) continue
+    v = substr(o, RSTART + 7, RLENGTH - 7); gsub(/"/, "", v)
+    e = ""
+    if (match(o, /"endPort":[0-9]+/)) e = substr(o, RSTART + 10, RLENGTH - 10)
+    if (v ~ /^[0-9]+$/) {
+      lo = v + 0; hi = (e == "" ? lo : e + 0)
+      for (w = 1; w <= nw; w++) if (ws[w] + 0 >= lo && ws[w] + 0 <= hi) res = 1
+    } else {
+      found = 0
+      for (k = 1; k <= nt; k++) { split(toks[k], parts, "="); if (parts[1] == v) { found = 1; for (w = 1; w <= nw; w++) if (parts[2] + 0 == ws[w] + 0) res = 1 } }
+      if (!found) UNRES = 1
+    }
+  }
+  return res
+}
+function ports_state(x, want, named,   r) {
+  if (x !~ /"(toPorts|ports)":/ || x !~ /"port":/) return 1
+  UNRES = 0
+  r = port_cover(x, want, named)
+  if (r == 1) return 1
+  return UNRES ? 2 : 0
+}
+'
+# "name=containerPort ..." of the containers of the pods a selector matches (to resolve named ports in policies)
+named_ports() { # namespace selector
+  K -n "$1" get pods -l "$2" -o jsonpath='{range .items[*]}{range .spec.containers[*]}{range .ports[*]}{.name}{"="}{.containerPort}{"\n"}{end}{end}{end}' 2>/dev/null \
+    | awk -F= 'NF==2 && $1!="" {print}' | sort -u | tr '\n' ' '
+}
 # Does anything allow ingress to the CoreDNS pods? The clusterwide deny selects kube-system including CoreDNS with an
 # empty ingress rule and the kit adds no ingress allow for it, so DNS only works if the stack ships one.
-# STRONG = selects the CoreDNS/kube-dns/node-cache pods, or has an empty selector AND allows port 53/1053.
-# WEAK = an empty selector with some other ingress: that is not proof that DNS is allowed.
+# STRONG = selects the CoreDNS/kube-dns/node-cache pods and a rule has no port restriction or covers 53/1053 (numeric, or a
+#          named port that resolves to one of them on the CoreDNS pods), or has an empty selector AND such a port restriction.
+# WEAK = a selector match without such a rule (empty selector with some other ingress, or a named port that could not be
+#        resolved): that is not proof that DNS is allowed.
 coredns_ingress_candidates() {
-  policy_lines kube-system | awk -F'|' '
+  local named
+  named="$(named_ports kube-system 'k8s-app in (coredns,kube-dns,k8s-dns-node-cache)')"
+  policy_lines kube-system | awk -F'|' -v named="$named" "$AWK_JSON_LIB"'
     $3 == "" || $3 == "[]" {next}
     { sel = ($2 ~ /coredns|kube-dns|k8s-dns-node-cache/); empty = ($2 == "{}" || $2 == "map[]")
-      # look at the port FIELDS only ("port":N / "port":"N"), never at CIDRs or other digits in the JSON
-      dnsport = 0; s = $3
-      while (match(s, /"port":"?[0-9]+"?/)) { p = substr(s, RSTART, RLENGTH); gsub(/[^0-9]/, "", p); if (p == 53 || p == 1053) dnsport = 1; s = substr(s, RSTART + RLENGTH) }
-      noports = ($3 !~ /"toPorts"|"ports"/)   # a rule without port restriction
-      if (sel && (dnsport || noports)) print "STRONG " $1
-      else if (empty && dnsport) print "STRONG " $1
-      else if (sel || empty) print "WEAK " $1 }'
+      if (!sel && !empty) next
+      n = split_rules($3, rules)
+      if (n == 0) { print "WEAK " $1 " (ingress not parsed)"; next }
+      strong = 0; unres = 0
+      for (i = 1; i <= n; i++) {
+        restricted = (rules[i] ~ /"(toPorts|ports)":/ && rules[i] ~ /"port":/)
+        st = ports_state(rules[i], "53 1053", named)
+        if (st == 1 && (sel || (empty && restricted))) strong = 1
+        if (st == 2) unres = 1
+      }
+      if (strong) print "STRONG " $1
+      else print "WEAK " $1 (unres ? " (named port not resolvable on the CoreDNS pods: unconfirmed)" : "") }'
 }
 # Port the API server really reaches on the Kyverno admission controller. Only the admission service counts (the port
 # named "https" of kyverno-svc; never the metrics service that carries the same component label). A named targetPort is
@@ -713,32 +890,39 @@ kyverno_admission_port() {
 #   CNP: fromEntities kube-apiserver / remote-node / host / cluster / all; or fromCIDR / fromCIDRSet (printed with a note:
 #        the CIDR must cover the API server, this is not checked)
 #   NetworkPolicy: an ipBlock (same note) or no `from` at all (every source)
+# The port is numeric, or named (e.g. "https") and then resolved against the container ports of the admission-controller pods;
+# a named port that does not resolve is reported as WEAK (unconfirmed), never as a match.
 # The selector must target the admission controller: component admission-controller, the Kyverno name/instance labels when
 # no component is given, or an empty selector. kyverno-app ships a CNP for it.
+# Output lines: "STRONG <policy> [note]" or "WEAK <policy> <reason>".
 kyverno_ingress_candidates() {
-  local port; port="$(kyverno_admission_port)"
-  policy_lines kyverno | awk -F'|' -v port="$port" '
+  local port named
+  port="$(kyverno_admission_port)"
+  named="$(named_ports kyverno 'app.kubernetes.io/component=admission-controller')"
+  policy_lines kyverno | awk -F'|' -v port="$port" -v named="$named" "$AWK_JSON_LIB"'
     $3 == "" || $3 == "[]" {next}
     { sel = 0
       if ($2 == "{}" || $2 == "map[]") sel = 1
       else if ($2 ~ /"app.kubernetes.io\/component":"[^"]*"/) sel = ($2 ~ /"app.kubernetes.io\/component":"admission-controller"/)
       else sel = ($2 ~ /"app.kubernetes.io\/(name|instance|part-of)":"kyverno"/)
       if (!sel) next
-      np = ($1 ~ /^NetworkPolicy\//); ok = 0; cidr = 0; r = $3
-      gsub(/\]\},\{/, "]}\n{", r); n = split(r, rules, "\n")
+      np = ($1 ~ /^NetworkPolicy\//); n = split_rules($3, rules)
+      if (n == 0) { print "WEAK " $1 " (ingress not parsed)"; next }
+      ok = 0; cidr = 0; unres = 0
       for (i = 1; i <= n; i++) { x = rules[i]; c = 0
-        if (np) { src = (x !~ /"from"/); if (x ~ /"ipBlock"/) { src = 1; c = 1 }
-                  pt = (x !~ /"ports"/) || (x ~ ("\"port\":\"?" port "\"?[,}]")) }
-        else    { src = (x ~ /"fromEntities":\[[^]]*"(kube-apiserver|remote-node|host|cluster|all)"/); if (x ~ /"fromCIDR(Set)?"/) { src = 1; c = 1 }
-                  pt = (x !~ /"toPorts"/) || (x ~ ("\"port\":\"" port "\"")) }
-        if (src && pt) { ok = 1; if (c) cidr = 1 } }
-      if (ok) print $1 (cidr ? " (CIDR source: must cover the API server)" : "") }'
+        if (np) { src = (x !~ /"from":/); if (x ~ /"ipBlock"/) { src = 1; c = 1 } }
+        else    { src = (x ~ /"fromEntities":\[[^]]*"(kube-apiserver|remote-node|host|cluster|all)"/); if (x ~ /"fromCIDR(Set)?"/) { src = 1; c = 1 } }
+        st = ports_state(x, port, named)
+        if (src && st == 1) { ok = 1; if (c) cidr = 1 }
+        else if (src && st == 2) unres = 1 }
+      if (ok) print "STRONG " $1 (cidr ? " (CIDR source: must cover the API server)" : "")
+      else if (unres) print "WEAK " $1 " (named port not resolvable on the admission controller pods: unconfirmed)" }'
 }
 
 preflight() {
   echo "== preflight"
   resolve_context || return 1
-  local server foreign cand strong weak kcand rc
+  local server foreign cand strong weak kcand kall kweak rc
   server="$(K config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)"
   echo "context: ${KCTX}   server: ${server:-?}   provider: ${PROVIDER}"
   K get ns kube-system >/dev/null 2>&1 || { echo "cluster unreachable" >&2; return 1; }
@@ -788,7 +972,7 @@ preflight() {
     echo "ingress to CoreDNS: candidate allowing policies found: ${strong}"
   else
     echo "WARNING: no policy allowing ingress to the CoreDNS pods was found (checked NetworkPolicy and CNP in kube-system and all CCNPs)." >&2
-    [ -n "$weak" ] && echo "         Found only unconfirmed ones (empty selector, no DNS port): ${weak}" >&2
+    [ -n "$weak" ] && echo "         Found only unconfirmed ones (no matching DNS port, or a named port that does not resolve): ${weak}" >&2
     echo "         The deny selects kube-system including CoreDNS with an empty ingress rule and the kit adds no CoreDNS ingress allow:" >&2
     echo "         cluster DNS would stop working for everybody. coredns-app ships NetworkPolicy kube-system/coredns for this" >&2
     echo "         (helm/coredns-app/templates/np.yaml, see SOURCES.md): is it installed and enabled on this cluster?" >&2
@@ -802,7 +986,9 @@ preflight() {
   fi
 
   if [ "$HAVE_GPOL" = 1 ] || K -n kyverno get deploy -l app.kubernetes.io/component=admission-controller -o name 2>/dev/null | grep -q .; then
-    kcand="$(kyverno_ingress_candidates | sort -u | tr '\n' ' ')"
+    kall="$(kyverno_ingress_candidates | sort -u)"
+    kcand="$(echo "$kall" | sed -n 's/^STRONG //p' | tr '\n' ' ')"
+    kweak="$(echo "$kall" | sed -n 's/^WEAK //p' | tr '\n' ';')"
     if [ -n "$kcand" ]; then
       echo "ingress to the Kyverno admission controller: candidate allowing policies: ${kcand}"
     else
@@ -810,6 +996,7 @@ preflight() {
       echo "         Under the deny the GeneratingPolicy webhook (failurePolicy Ignore) would time out and nothing would be generated, which" >&2
       echo "         looks like a failed kit. kyverno-app ships CNP allow-kyverno-admission-controller-talk-to-apiserver for this" >&2
       echo "         (ciliumNetworkPolicy.enabled: true, see SOURCES.md)." >&2
+      [ -n "$kweak" ] && echo "         Found only unconfirmed ones (not counted): ${kweak}" >&2
       if [ "${SPIKE_ALLOW_NO_KYVERNO_INGRESS:-}" != "true" ]; then
         echo "REFUSING (override with SPIKE_ALLOW_NO_KYVERNO_INGRESS=true if the API server reaches Kyverno some other way)." >&2
         return 1
@@ -830,7 +1017,7 @@ setup() {
   echo "== applying probe workloads"
   TOUCHED=1
   apply_manifest "$M/probes/probes.yaml" || { echo "applying the probe workloads failed" >&2; return 1; }
-  local ns f a deny_pre=0 base_taken=0 base_rs=""
+  local ns f a deny_pre=0 base_taken=0 base_rs="" BASE_HEALTH=""
   for ns in "$NS_A" "$NS_B" "$NS_OPTOUT" "$NS_ALL"; do
     K -n "$ns" wait --for=condition=Ready pod/client pod/server --timeout=180s >/dev/null 2>&1 \
       || { echo "probe pods in $ns not Ready (image pull? set SPIKE_IMAGE)" >&2; return 1; }
@@ -848,6 +1035,8 @@ setup() {
     if expect_reach "$NS_A" "$EXTERNAL_URL"; then EXT_BASE=1; else EXT_BASE=0; echo "note: ${EXTERNAL_URL} not reachable even before the deny: the external-blocked assertion will not be made"; fi
     rm -f "$OUTDIR/baseline.meta"
     snapshot_hostnetwork "$OUTDIR/hostnetwork-before.txt"
+    BASE_HEALTH="$(capture_cluster_health)"
+    echo "cilium cluster health before the deny (agent reachable total): $(echo "$BASE_HEALTH" | tr '\n' ';')"
     base_rs="$(K -n "$NS_A" get pod server -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null)"
     base_taken=1
   fi
@@ -868,6 +1057,8 @@ setup() {
     if [ "$base_taken" = 1 ]; then
       # ties the pre-deny baseline to THIS deny (uid) and context, so a later run never trusts a stale file
       printf 'ctx=%s\ndenyuid=%s\nserver_restarts=%s\n' "$KCTX" "$(K get "$CCNP" "$DENY_NAME" -o jsonpath='{.metadata.uid}' 2>/dev/null)" "${base_rs:-}" > "$OUTDIR/baseline.meta"
+      # one `health=<agent> <reachable> <total>` line per agent that answered before the deny
+      echo "$BASE_HEALTH" | sed -n 's/^\([^ ][^ ]*\) \([0-9][0-9]*\) \([0-9][0-9]*\)$/health=\1 \2 \3/p' >> "$OUTDIR/baseline.meta"
     fi
   fi
   sleep "$SETTLE"
@@ -922,20 +1113,25 @@ ac1_optout_live_flip() {
   reset_state; begin
   step "unannotated same-namespace denied" "precondition: same-namespace traffic in unannotated $NS_A is not denied (is the clusterwide deny applied? does the selector match?)" \
     eventually 30 2 expect_blocked "$NS_A" "$NS_A" || { finish ac1; return; }
-  local uid0 rs0 uid1 rs1 ag
+  local uid0 rs0 uid1 rs1 ag node where irc
   uid0="$(K -n "$NS_A" get pod client -o jsonpath='{.metadata.uid}')"; rs0="$(K -n "$NS_A" get pod client -o jsonpath='{.status.containerStatuses[0].restartCount}')"
   set_optout "$NS_A" || { finish ac1; return; }
   step "opt-out label added -> reachable after @T@s" "opt-out label added -> still not reachable after ${FLIP_TIMEOUT}s" eventually "$FLIP_TIMEOUT" 1 expect_reach "$NS_A" "$NS_A"
   uid1="$(K -n "$NS_A" get pod client -o jsonpath='{.metadata.uid}')"; rs1="$(K -n "$NS_A" get pod client -o jsonpath='{.status.containerStatuses[0].restartCount}')"
-  # the identity half is checked while the label is set; the label is removed again right after
-  ag="$(first_agent)"
+  # The identity half is checked while the label is set; the label is removed again right after. The identity only exists
+  # on nodes that host an endpoint of the namespace, so ask the agent on the node of the probe pod.
+  node="$(K -n "$NS_A" get pod client -o jsonpath='{.spec.nodeName}' 2>/dev/null)"
+  ag=""; [ -n "$node" ] && ag="$(agent_on_node "$node")"
+  where="the agent on the probe pod's node ${node:-?}"
+  if [ -z "$ag" ]; then ag="$(first_agent)"; where="the first agent (none found on node ${node:-?}; identities are cluster-global, so this can still work)"; fi
+  mkdir -p "$OUTDIR"; AC1_ID_FILE="$OUTDIR/ac1-identity.txt"; AC1_ID_MODE=""
   if [ -n "$ag" ]; then
-    has_optout_identity() { agent_exec "$ag" identity list 2>/dev/null | grep -q 'namespace.labels.policy.giantswarm.io/default-deny=false'; }
-    if eventually 30 2 has_optout_identity; then
-      ev "identity list of agent $ag shows an identity carrying the opt-out label"
-    else
-      ev "identity list of agent $ag shows NO identity carrying the opt-out label (identity half NOT verified)"; INCONC=1
-    fi
+    eventually 30 2 ac1_read_identity "$ag"; irc=$?
+    case "$irc" in
+      0) ev "identity of namespace $NS_A on agent $ag (${where}, cilium-dbg ${AC1_ID_MODE}) carries k8s:io.cilium.k8s.namespace.labels.${OPTOUT_LABEL}=false" ;;
+      1) ev "agent $ag (${where}): identities were read but none carries both k8s:io.kubernetes.pod.namespace=${NS_A} and k8s:io.cilium.k8s.namespace.labels.${OPTOUT_LABEL}=false (identity half NOT verified; raw output in ${AC1_ID_FILE}; by hand: cilium-dbg endpoint list, then cilium-dbg identity get <id>)"; INCONC=1 ;;
+      *) ev "cannot read identities with cilium-dbg identity list on agent $ag: identity half NOT verified (the opt-out label in the identity is only shown behaviourally)"; INCONC=1 ;;
+    esac
   else
     ev "no cilium agent exec: identity half NOT verified (the opt-out label in the identity is only shown behaviourally)"; INCONC=1
   fi
@@ -947,7 +1143,27 @@ ac1_optout_live_flip() {
 
 # The pre-deny baseline (hostnetwork-before.txt, server restart count) is only trusted when baseline.meta ties it to the
 # deny that is applied now (same context, same deny uid): never a leftover of an earlier run or another cluster.
-BASE_RS=""
+BASE_RS=""; BASE_HEALTH=""
+# Cilium "Cluster health" of EVERY agent that answers: one "<agent> <reachable> <total>" line each. Taken before the deny (with a
+# short wait for N == M, so a freshly started agent is not recorded half way through its first probe round) and again by ac2.
+capture_cluster_health() {
+  local pod ip h end
+  while read -r pod ip; do
+    [ -z "$pod" ] && continue
+    end=$((SECONDS + ${SPIKE_HEALTH_WAIT:-20}))
+    while :; do
+      h="$(cluster_health_of "$pod")"
+      [ -z "$h" ] && break   # not readable (no exec): nothing to record for this agent
+      # shellcheck disable=SC2086 # h is "N M"
+      set -- $h
+      [ "$1" = "$2" ] && break
+      [ "$SECONDS" -ge "$end" ] && break
+      sleep 2
+    done
+    [ -n "$h" ] && echo "$pod $h"
+  done < <(agent_pods)
+  return 0
+}
 baseline_valid() { # -> 0 valid (BASE_RS set), 1 not
   local meta="$OUTDIR/baseline.meta" mctx muid cur
   BASE_RS=""
@@ -956,13 +1172,60 @@ baseline_valid() { # -> 0 valid (BASE_RS set), 1 not
   cur="$(K get "$CCNP" "$DENY_NAME" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
   [ "$mctx" = "$KCTX" ] && [ -n "$muid" ] && [ "$muid" = "$cur" ] || return 1
   BASE_RS="$(sed -n 's/^server_restarts=//p' "$meta")"
+  BASE_HEALTH="$(sed -n 's/^health=//p' "$meta")"
   return 0
+}
+
+# Compare the Cilium cluster health of every agent with its pre-deny baseline (BASE_HEALTH lines "<agent> <reachable> <total>").
+ac2_cluster_health() {
+  local now pod ip h n m bn bm base_line report="" worse="" unread="" nobase="" short=0 nag=0 enf=""
+  now="$(SPIKE_HEALTH_WAIT=0 capture_cluster_health)"   # no convergence wait: the number now is the number to judge
+  while read -r pod n m; do
+    [ -z "$pod" ] && continue
+    nag=$((nag + 1))
+    base_line="$(printf '%s\n' "$BASE_HEALTH" | awk -v p="$pod" '$1==p{print $2, $3; exit}')"
+    if [ -z "$base_line" ]; then
+      report="${report}${pod} no-baseline->${n}/${m}; "; nobase="${nobase} ${pod}"
+      [ "$n" != "$m" ] && short=1
+      continue
+    fi
+    bn="${base_line% *}"; bm="${base_line#* }"
+    report="${report}${pod} ${bn}/${bm}->${n}/${m}; "
+    # unreachable count before vs after: robust against a node count that changed in between
+    if [ $((m - n)) -gt $((bm - bn)) ]; then worse="${worse} ${pod}(${bn}/${bm}->${n}/${m})"; fi
+  done <<< "$now"
+  while read -r pod ip; do
+    [ -z "$pod" ] && continue
+    printf '%s\n' "$now" | awk -v p="$pod" '$1==p{f=1} END{exit !f}' || unread="${unread} ${pod}"
+  done < <(agent_pods)
+  # policy enforcement of the Cilium health endpoint (reserved:health) per agent: Disabled/Disabled = no policy selects it
+  while read -r pod ip; do
+    [ -z "$pod" ] && continue
+    h="$(agent_exec "$pod" endpoint list)" || continue
+    h="$(printf '%s\n' "$h" | awk '/reserved:health/{print $2 "/" $3; exit}')"
+    [ -n "$h" ] && enf="${enf}${pod}=${h} "
+  done < <(agent_pods)
+  if [ "$nag" -eq 0 ]; then
+    ev "cilium cluster health NOT read on any agent (no exec): health half NOT verified"; INCONC=1; return 0
+  fi
+  ev "cilium cluster health per agent, before the deny -> now (reachable/total): ${report%; }"
+  [ -n "$unread" ] && ev "agents that did not answer now:${unread}"
+  ev "health endpoint (reserved:health) policy enforcement ingress/egress per agent: ${enf:-not read} (Disabled/Disabled = no policy selects it)"
+  if [ -n "$worse" ]; then
+    ev "cilium cluster health DEGRADED versus the pre-deny baseline on:${worse}"; OK=0
+  elif [ -n "$nobase" ] && [ "$short" = 1 ]; then
+    ev "no pre-deny baseline for:${nobase} and not every node is reachable: cannot tell whether the deny caused it"; INCONC=1
+  elif [ -n "$nobase" ]; then
+    ev "no pre-deny baseline for:${nobase}; all nodes reachable now"
+  else
+    ev "cilium cluster health not worse than before the deny on any agent"
+  fi
 }
 
 # ac2: kubelet / Cilium health probes and hostNetwork pods unaffected
 ac2_probes_hostnetwork() {
   reset_state; begin
-  local before="$OUTDIR/hostnetwork-before.txt" after="$OUTDIR/hostnetwork-after.txt" ready1 rs rs_start ag health newly nbefore nafter hn hm base_ok=0 need=40 left
+  local before="$OUTDIR/hostnetwork-before.txt" after="$OUTDIR/hostnetwork-after.txt" ready1 rs rs_start newly nbefore nafter base_ok=0 need=40 left
   mkdir -p "$OUTDIR"
   rs_start="$(K -n "$NS_A" get pod server -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null)"
   # give the deny time to bite (readiness/liveness periods, node-level probes) before the snapshot
@@ -989,17 +1252,10 @@ ac2_probes_hostnetwork() {
     ev "no valid pre-deny baseline (missing, from another context/deny, or the deny pre-dated this run); hostNetwork pods not ready now: ${nafter}"
     [ "$nafter" != 0 ] && INCONC=1
   fi
-  ag="$(first_agent)"
-  health=""; [ -n "$ag" ] && health="$(agent_exec "$ag" status 2>/dev/null | grep -i 'cluster health' | head -n1)"
-  hn="$(echo "$health" | sed -n 's/.*[Cc]luster health:[[:space:]]*\([0-9][0-9]*\)\/\([0-9][0-9]*\).*/\1/p')"
-  hm="$(echo "$health" | sed -n 's/.*[Cc]luster health:[[:space:]]*\([0-9][0-9]*\)\/\([0-9][0-9]*\).*/\2/p')"
-  if [ -z "$hn" ]; then
-    ev "cilium health line not captured (no agent exec or unexpected format): health half NOT verified"; INCONC=1
-  elif [ "$hn" = "$hm" ]; then
-    ev "cilium cluster health ${hn}/${hm} reachable"
-  else
-    ev "cilium cluster health DEGRADED: ${hn}/${hm} reachable"; OK=0
-  fi
+  # Cilium "Cluster health" on EVERY agent, compared with the same agent before the deny. FAIL only when more nodes are
+  # unreachable than before (the first run saw 3/7 and 1/6 under the deny, caused by the health endpoint being selected by the
+  # deny; the manifests now exclude reserved:health). Both numbers are reported.
+  ac2_cluster_health
   finish ac2
   note "MANUAL extra: 'cilium-dbg status --all-health' on an agent and 'kubectl get nodes' stay green; compare node Ready condition."
 }
@@ -1036,13 +1292,14 @@ ac3_aks_support() {
 
 # ac4: per-endpoint BPF policy-map usage with deny + DNS allow + all six standard allows
 ac4_bpf_map_usage() {
-  reset_state; begin
+  reset_state; begin; gen_seen_reset
   [ "$HAVE_GPOL" = 1 ] || { result ac4 MANUAL "GeneratingPolicy CRD missing: cannot generate the six standard allows. Apply them by hand then run: cilium-dbg bpf policy get --all -n"; return; }
   K apply -f "$M/ccnp-allow-dns-all-namespaces.yaml" >/dev/null || { result ac4 ERROR "applying the clusterwide DNS allow failed"; return; }
-  local a i
-  annotate_all "$NS_ALL" || { result ac4 ERROR "could not annotate $NS_ALL"; return; }
+  local a i lost
+  # one annotation per request, 2 s apart: the bulk (single-request) annotation has its own check
+  annotate_each "$NS_ALL" || { result ac4 ERROR "could not annotate $NS_ALL"; return; }
   for a in $GEN_ANNOTATIONS; do
-    eventually "$SYNC_TIMEOUT" 2 cnp_exists "$NS_ALL" "$(gname "$a")" || { result ac4 FAIL "standard allow $a not generated in $NS_ALL within ${SYNC_TIMEOUT}s"; return; }
+    await_generated "$NS_ALL" "$a" || { result ac4 FAIL "standard allow $a was NEVER generated in $NS_ALL within ${SYNC_TIMEOUT}s"; return; }
   done
   for i in $(seq 1 "$LOAD_PODS"); do
     cat <<EOF | K apply -f - >/dev/null
@@ -1071,6 +1328,12 @@ EOF
   done
   K -n "$NS_ALL" wait --for=condition=Ready pod --all --timeout=180s >/dev/null 2>&1 || note "not all load pods Ready; continuing"
   sleep 10
+  if lost="$(lost_allows "$NS_ALL")"; then
+    K -n "$NS_ALL" delete pods -l "load,${OWNER_SEL}" --wait=false >/dev/null 2>&1 || true
+    delete_owned "$CCNP" "$DNS_ALLOW_NAME"
+    result ac4 FINDING "generated-then-deleted: standard allows that were generated in $NS_ALL are gone again: ${lost} (not regenerated). The map measurement would not include them, so it was not taken: see the bulk check"
+    return
+  fi
   local limit cm out="$OUTDIR/bpf-policy-maps.txt" best maxn maxwhere pct
   cm="$(K -n kube-system get cm cilium-config -o jsonpath='{.data.bpf-policy-map-max}' 2>/dev/null)"
   limit="${cm:-16384}"
@@ -1127,8 +1390,9 @@ ac5_generate_sync() {
 ac5b_generate_existing() {
   reset_state; begin
   [ "$HAVE_GPOL" = 1 ] || { result ac5b MANUAL "GeneratingPolicy CRD missing on this cluster"; return; }
-  local a=allow-kube-apiserver n rc scaled=0
+  local a=allow-kube-apiserver n rc scaled=0 f="$OUTDIR/ac5b-evidence.txt" ur0 ur1 t_apply waited hits
   n="$(gname "$a")"
+  mkdir -p "$OUTDIR"; : > "$f"
   # (i) policy created after the namespace was annotated
   delete_owned "$GPOL" "$n" || fail_op "deleting GeneratingPolicy $n FAILED"
   eventually 60 2 cnp_gone "$NS_B" "$n"
@@ -1140,8 +1404,16 @@ ac5b_generate_existing() {
     1) ev "no CNP while the policy is absent" ;;
     *) fail_op "cannot check for the CNP: $P_DETAIL" ;;
   esac
+  ur0="$(ur_count)"; ur_dump "$f" "before re-creating $n"
   apply_gpol "$M/generatingpolicies/generatingpolicy-${a}.yaml" || fail_op "re-applying the GeneratingPolicy failed"
+  t_apply=$SECONDS
   step "policy (re)created -> CNP generated for the already annotated namespace after @T@s" "policy (re)created but CNP NOT generated within ${SYNC_TIMEOUT}s" eventually "$SYNC_TIMEOUT" 2 cnp_exists "$NS_B" "$n"
+  # explicit evidence: how long was waited, was an UpdateRequest created for it, what did the background controller log
+  waited=$((SECONDS - t_apply))
+  ur1="$(ur_count)"; ur_dump "$f" "after waiting ${waited}s"
+  { echo "--- GeneratingPolicy $n status"; K get "$GPOL" "$n" -o jsonpath='ready={.status.conditionStatus.ready} message={.status.conditionStatus.message}{"\n"}' 2>&1; } >> "$f"
+  hits="$(bgc_log_hits "$f" "$n" $((waited + 30)))"
+  ev "generate-existing (i): waited ${waited}s of max ${SYNC_TIMEOUT}s after re-creating the policy; UpdateRequests in kyverno before/after: ${ur0}/${ur1}; background-controller log lines mentioning ${n} in the last $((waited + 30))s: ${hits} (details: $f)"
   unannotate "$NS_B" "$a"
   eventually "$SYNC_TIMEOUT" 2 cnp_gone "$NS_B" "$n" || true
   # (ii) Kyverno down while the namespace gets annotated
@@ -1189,17 +1461,24 @@ kyverno_down_test() { # annotation -> 0 generated after restore, 1 not generated
 # (kyverno pkg/background/gpol/generate_controller.go:87-93, dynamic_watcher.go:210-248). Measure what that does to
 # traffic when the update is unrelated (a dummy label/annotation).
 ac_flap() {
-  reset_state; begin
+  reset_state; begin; gen_seen_reset
   [ "$HAVE_GPOL" = 1 ] || { result flap MANUAL "GeneratingPolicy CRD missing on this cluster"; return; }
-  local a f_watch="$OUTDIR/flap-watch.txt" f_probe="$OUTDIR/flap-probe.txt" u0="$OUTDIR/flap-uids-before.txt" u1="$OUTDIR/flap-uids-after.txt"
+  local lost a f_watch="$OUTDIR/flap-watch.txt" f_probe="$OUTDIR/flap-probe.txt" u0="$OUTDIR/flap-uids-before.txt" u1="$OUTDIR/flap-uids-after.txt"
   local srv url end i wpid ppid_ nd ng mg total failhttp faildns changed uperr=0 nexp last now cnt dl settled=""
   mkdir -p "$OUTDIR"; : > "$f_watch"; : > "$f_probe"
-  annotate_all "$NS_A" || { finish flap; return; }
+  # one annotation per request, 2 s apart, so this check measures the unrelated-update flap and not the bulk-annotation behaviour (`bulk`)
+  annotate_each "$NS_A" || { finish flap; return; }
   for a in $GEN_ANNOTATIONS; do
-    step "" "standard allow $a not generated within ${SYNC_TIMEOUT}s" eventually "$SYNC_TIMEOUT" 2 cnp_exists "$NS_A" "$(gname "$a")" || { finish flap; return; }
+    step "" "standard allow $a was NEVER generated within ${SYNC_TIMEOUT}s" await_generated "$NS_A" "$a" || { finish flap; return; }
   done
   step "" "same-namespace not reachable with all six annotations" eventually "$SYNC_TIMEOUT" 2 expect_reach "$NS_A" "$NS_A" || { finish flap; return; }
   step "" "DNS not working with allow-dns annotated" eventually "$SYNC_TIMEOUT" 2 expect_dns_works "$NS_A" || { finish flap; return; }
+  if lost="$(lost_allows "$NS_A")"; then
+    ev "generated-then-deleted BEFORE any unrelated update was made: ${lost} (not regenerated), so this is not the unrelated-update flap: see the bulk check"
+    result flap FINDING "$EV"
+    unannotate_all "$NS_A"
+    return
+  fi
   srv="$(pod_ip "$NS_A" server)"; url="http://${srv}:8080/"
   set -- $GEN_ANNOTATIONS; nexp=$#
   cnp_uids "$NS_A" > "$u0"
@@ -1271,24 +1550,122 @@ ac_flap() {
   unannotate_all "$NS_A"
 }
 
+# bulk: all six annotations in ONE request (one Namespace UPDATE) vs one at a time (control), CNPs counted over time.
+# First real run on Kyverno 1.17.2: all six were generated within 5 s, then ~2 min later the background controller processed a
+# second set of UpdateRequests (nothing had changed in between) that deleted all six and never regenerated them; annotating
+# them one at a time kept all six for 3+ minutes. Fresh namespaces per run, so no state of an earlier check can leak in.
+bulk_ns_fresh() { # ns: create an owner-labelled namespace, deleting a leftover of an earlier run first
+  local rc
+  kexists namespaces "$1"; rc=$?
+  case "$rc" in
+    2) fail_op "$P_DETAIL"; return 1 ;;
+    0) delete_owned namespaces "$1" || { fail_op "cannot delete the leftover namespace $1"; return 1; }
+       eventually 180 3 gone namespaces "$1" || { fail_op "leftover namespace $1 still terminating after 180s"; return 1; } ;;
+  esac
+  cat <<EOF | K apply -f - >/dev/null || { fail_op "creating namespace $1 FAILED"; return 1; }
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: $1
+  labels:
+    ${OWNER_KEY}: ${OWNER_VAL}
+EOF
+}
+# "T:n T:n ..." (seconds after the annotation : kit allows present) -> TS_PEAK, TS_FINAL, TS_FINAL_T, and when the count first
+# fell below an earlier peak: TS_DROP_T (that sample), TS_PREV_T (the sample before it), TS_DROP_PEAK (the peak before the fall)
+timeline_stats() {
+  local p t n prev_t=""
+  TS_PEAK=0; TS_FINAL=0; TS_FINAL_T=""; TS_DROP_T=""; TS_PREV_T=""; TS_DROP_PEAK=0
+  for p in $1; do
+    t="${p%%:*}"; n="${p#*:}"
+    if [ -z "$TS_DROP_T" ] && [ "$n" -lt "$TS_PEAK" ]; then TS_DROP_T="$t"; TS_PREV_T="$prev_t"; TS_DROP_PEAK="$TS_PEAK"; fi
+    [ "$n" -gt "$TS_PEAK" ] && TS_PEAK="$n"
+    TS_FINAL="$n"; TS_FINAL_T="$t"; prev_t="$t"
+  done
+  return 0
+}
+# verdict for one timeline -> "<word>|<sentence>": never (0 at every sample), ok (N/N throughout), partial (steady but short
+# of N), deleted (fell below an earlier peak and is still below at the last sample), regenerated (fell, and is back at the peak)
+timeline_verdict() { # series nexp
+  timeline_stats "$1"
+  if [ "$TS_PEAK" -eq 0 ]; then echo "never|0/$2 generated at any sample"
+  elif [ -n "$TS_DROP_T" ] && [ "$TS_FINAL" -lt "$TS_PEAK" ]; then
+    echo "deleted|${TS_DROP_PEAK}/$2 generated then deleted after ~${TS_DROP_T}s (present at ${TS_PREV_T:-the start}s, short at ${TS_DROP_T}s) without regeneration; ${TS_FINAL}/$2 at ${TS_FINAL_T}s"
+  elif [ -n "$TS_DROP_T" ]; then echo "regenerated|${TS_DROP_PEAK}/$2 deleted at ~${TS_DROP_T}s and regenerated by ${TS_FINAL_T}s"
+  elif [ "$TS_FINAL" -lt "$2" ]; then echo "partial|only ${TS_FINAL}/$2 generated, steady through ${TS_FINAL_T}s"
+  else echo "ok|all $2/$2 persisted through ${TS_FINAL_T}s"; fi
+}
+ac_bulk() {
+  reset_state; begin
+  [ "$HAVE_GPOL" = 1 ] || { result bulk MANUAL "GeneratingPolicy CRD missing on this cluster"; return; }
+  local f="$OUTDIR/bulk-evidence.txt" t0b t0s T cb cs sb="" ss="" nb ns_ nexp ur0 ur1 wins hits vb vs wb ws status last
+  mkdir -p "$OUTDIR"; : > "$f"
+  set -- $GEN_ANNOTATIONS; nexp=$#
+  bulk_ns_fresh "$NS_BULK" || { finish bulk; return; }
+  bulk_ns_fresh "$NS_SEQ" || { finish bulk; return; }
+  ur0="$(ur_count)"; ur_dump "$f" "before the annotations"
+  annotate_bulk "$NS_BULK" || { finish bulk; return; }
+  t0b=$SECONDS
+  note "bulk: all ${nexp} annotations of $NS_BULK in one request; control: $NS_SEQ one at a time, ${SPIKE_ANNOTATE_GAP:-2}s apart; counting CNPs at ${BULK_SAMPLES// /s, }s"
+  annotate_each "$NS_SEQ" || { finish bulk; return; }
+  t0s=$((SECONDS - ${SPIKE_ANNOTATE_GAP:-2}))
+  for T in $BULK_SAMPLES; do
+    while [ "$SECONDS" -lt $((t0b + T)) ]; do sleep 1; done
+    cb="$(count_allows "$NS_BULK")"; cs="$(count_allows "$NS_SEQ")"
+    nb="$(names_allows "$NS_BULK")"; ns_="$(names_allows "$NS_SEQ")"
+    sb="$sb ${T}:${cb:-0}"; ss="$ss ${T}:${cs:-0}"; last="$T"
+    echo "t=${T}s (control age $((SECONDS - t0s))s) bulk=${cb:-0}/${nexp} [${nb}] control=${cs:-0}/${nexp} [${ns_}] urs=$(ur_count)" >> "$f"
+  done
+  ur1="$(ur_count)"; ur_dump "$f" "after the last sample"
+  wins=$((SECONDS - t0b + 60))
+  hits="$(bgc_log_hits "$f" "${KIT}-allow" "$wins")"
+  sb="${sb# }"; ss="${ss# }"
+  vb="$(timeline_verdict "$sb" "$nexp")"; vs="$(timeline_verdict "$ss" "$nexp")"
+  wb="${vb%%|*}"; ws="${vs%%|*}"
+  ev "CNP counts as seconds:allows, bulk (one request) ${sb}, control (one by one) ${ss}; UpdateRequests in kyverno before/after: ${ur0}/${ur1}; background-controller log lines mentioning ${KIT}-allow in the last ${wins}s: ${hits} (details: $f)"
+  delete_owned namespaces "$NS_BULK" || fail_op "deleting namespace $NS_BULK FAILED"
+  delete_owned namespaces "$NS_SEQ" || fail_op "deleting namespace $NS_SEQ FAILED"
+  if [ "$ERR" = 1 ]; then finish bulk; return; fi
+  case "$wb:$ws" in
+    never:never) result bulk FAIL "$EV; NO allow was generated in either namespace within ${last}s (kit/Kyverno setup problem: see ac5)"; return ;;
+    never:*) result bulk FINDING "bulk annotation: ${vb#*|} while the one-by-one control: ${vs#*|}. $EV"; return ;;
+  esac
+  case "$wb" in
+    ok) status=PASS ;;
+    *) status=FINDING ;;
+  esac
+  ev "bulk annotation: ${vb#*|}"
+  if [ "$ws" = ok ]; then ev "one-by-one control: ${vs#*|}"; else status=FINDING; ev "one-by-one control ALSO misbehaved (${vs#*|}): not specific to the bulk annotation"; fi
+  result bulk "$status" "$EV"
+}
+
 # restart: annotate, generate, restart the background controller, remove the annotation: the CNP must go away
 ac_restart() {
   reset_state; begin
   [ "$HAVE_GPOL" = 1 ] || { result restart MANUAL "GeneratingPolicy CRD missing on this cluster"; return; }
   [ "${SPIKE_SKIP_KYVERNO_RESTART:-}" = "true" ] && { result restart NOT-RUN "skipped by SPIKE_SKIP_KYVERNO_RESTART=true"; return; }
-  local a=allow-same-namespace n d
+  local a=allow-same-namespace n d f="$OUTDIR/restart-evidence.txt" ur0 ur1 t_rs t_un waited hits
   n="$(gname "$a")"
+  mkdir -p "$OUTDIR"; : > "$f"
   d="$(K -n kyverno get deploy -l app.kubernetes.io/component=background-controller -o name 2>/dev/null | head -n1)"
   [ -n "$d" ] || { result restart INCONCLUSIVE "no background-controller deployment found in namespace kyverno"; return; }
   annotate "$NS_A" "$a" || { finish restart; return; }
   step "CNP generated" "CNP $n NOT generated within ${SYNC_TIMEOUT}s" eventually "$SYNC_TIMEOUT" 2 cnp_exists "$NS_A" "$n" || { finish restart; return; }
+  t_rs=$SECONDS
   if K -n kyverno rollout restart "$d" >/dev/null 2>&1 && K -n kyverno rollout status "$d" --timeout=180s >/dev/null 2>&1; then
     ev "restarted $d"
   else
     fail_op "restart of $d failed or did not finish in 180s"; finish restart; return
   fi
+  ur0="$(ur_count)"; ur_dump "$f" "after the restart, before removing the annotation"
   unannotate "$NS_A" "$a"
+  t_un=$SECONDS
   step "annotation removed after the background controller restart -> CNP deleted after @T@s" "CNP still present 120s after annotation removal following the background controller restart" eventually 120 2 cnp_gone "$NS_A" "$n"
+  # explicit evidence: how long was waited, was an UpdateRequest created by the removal, what did the (new) background controller log
+  waited=$((SECONDS - t_un))
+  ur1="$(ur_count)"; ur_dump "$f" "after waiting ${waited}s"
+  hits="$(bgc_log_hits "$f" "$n" $((SECONDS - t_rs + 30)))"
+  ev "waited ${waited}s of max 120s after removing the annotation; UpdateRequests in kyverno before/after: ${ur0}/${ur1}; background-controller log lines mentioning ${n} since the restart: ${hits} (details: $f)"
   finish restart
 }
 
@@ -1536,7 +1913,7 @@ ac8_drops_gs_namespaces() {
 
 # ac9: guidance recorded upstream
 ac9_record_guidance() {
-  result ac9 MANUAL "copy the winning webhook source (ac6), the L7/L4 DNS finding (ac7), map headroom (ac4), the sync/generate-existing behavior (ac5, ac5b) and the flap/restart findings into giantswarm/giantswarm#32658 (CNP guidance)."
+  result ac9 MANUAL "copy the winning webhook source (ac6), the L7/L4 DNS finding (ac7), map headroom (ac4), the sync/generate-existing behavior (ac5, ac5b) and the flap/bulk/restart findings into giantswarm/giantswarm#32658 (CNP guidance)."
 }
 
 # ---------------------------------------------------------------------------------------------- driver
@@ -1558,6 +1935,9 @@ print_summary() {
   echo "== summary (also in $f)"
   for r in "${RESULTS[@]+"${RESULTS[@]}"}"; do IFS='|' read -r a s e <<< "$r"; printf '%-9s %s\n' "$a" "$s"; done
 }
+
+# test hook for the offline mock-kubectl tests: SPIKE_SOURCE_ONLY=1 . ./run-checklist.sh defines everything above and returns
+if [ "${SPIKE_SOURCE_ONLY:-}" = 1 ]; then return 0 2>/dev/null || exit 0; fi
 
 case "$CMD" in
   list) for a in $(all_checks | tr ',' ' '); do echo "$a -> $(fn_for "$a")"; done; exit 0 ;;

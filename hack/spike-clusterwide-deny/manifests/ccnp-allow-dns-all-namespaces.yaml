@@ -1,5 +1,5 @@
 # Kit copy of the PRD policy "allow-dns-all-namespaces". Renamed ddn-spike-* so that the kit never touches a real policy.
-# Clusterwide DNS allow (PRD "DNS allow"): same endpoint selector as the clusterwide deny, same targets and
+# Clusterwide DNS allow (PRD "DNS allow"): same endpoint selector as the clusterwide deny (including the `reserved:health` exclusion), same targets and
 # ports as the per-namespace default-allow-dns of network-policies-app
 # (helm/network-policies-app/templates/cilium/allow-dns.yaml): CoreDNS, node-local DNS cache, kube-dns (AKS).
 # L4 only. network-policies-app adds `rules.dns: [{matchPattern: "*"}]` only when allowEgressToProxy.enabled;
@@ -18,6 +18,12 @@ spec:
         operator: NotIn
         values:
           - "false"
+      # Exclude the Cilium health endpoint: it carries only `reserved:health` and no namespace labels, so the NotIn
+      # above selects it, and the empty ingress/egress rule then cut cluster-health probing (first real run: Cluster
+      # health 3/7, 1/6). The `reserved:` source is kept as written by Cilium's selector sanitizer. Keep this
+      # expression identical in the deny and in the DNS allow. See SOURCES.md "Cilium health endpoint".
+      - key: reserved:health
+        operator: DoesNotExist
   egress:
     - toEndpoints:
         - matchLabels:

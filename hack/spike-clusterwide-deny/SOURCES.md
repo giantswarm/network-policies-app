@@ -63,6 +63,47 @@ Namespace UPDATE on a busy cluster.
 | `cilium-dbg endpoint list -o jsonpath` syntax; CiliumEndpoint `status.id` | `cilium/Documentation/cheatsheet.rst:71-73`, `cilium/Documentation/security/policy-creation.rst:90` |
 | policy map size flag `--bpf-policy-map-max`, default 16384 per endpoint (docs); hard compile-time upper bound `1<<16` | `cilium/Documentation/cmdref/cilium-agent.md:68`, `cilium/pkg/option/config.go:531-532` |
 
+### Cilium health endpoint (`reserved:health`) and the deny
+
+First real run: the clusterwide deny also selected each node's health endpoint, so `Cluster health` fell to 3/7 and 1/6. The
+manifests exclude it with `matchExpressions: [{key: "reserved:health", operator: DoesNotExist}]` next to the namespace
+opt-out `NotIn`, in both CCNPs. This is the form chosen (the alternative, a separate allow CCNP for health traffic, is not
+needed because a selector can exclude it). Evidence, Cilium `main` (`c57b662efd03`):
+
+| Fact | Evidence |
+|---|---|
+| the health endpoint gets exactly the label `reserved:health` (source `reserved`, key `health`, no value) and nothing else; it has no namespace labels, which is why `NotIn` on a namespace label selects it | `cilium/pkg/labels/labels.go:54` (`IDNameHealth`), `:94` (`LabelHealth`), `cilium/pkg/health/health_connectivity_endpoint.go:409` (`ep.UpdateLabels(... labels.LabelHealth ...)`) |
+| selector keys may carry a label source (`<source>:<key>`); the CRD schema puts no pattern on `matchExpressions[].key` (plain string) and Cilium's validation accepts one `:` with a source prefix | `cilium/pkg/labels/validation.go:112-135` (`IsValidCiliumLabelKey`), `cilium/pkg/policy/api/selector.go:222-238` (`Validate` / `Sanitize`), `cilium/pkg/k8s/apis/cilium.io/client/crds/v2/ciliumclusterwidenetworkpolicies.yaml:1798-1820` (`spec.endpointSelector.matchExpressions.key: type string`) |
+| `Sanitize` keeps an explicit source: only keys without one get the `any:` prefix, so `reserved:health` stays `reserved:health` | `cilium/pkg/labels/labels.go:980-987` (`NewSourceEncodedLabelKey`) |
+| `DoesNotExist` is evaluated as "the label array has no label with that key"; a `reserved:` selector key only matches a `reserved:` label (`any:` would match every source) | `cilium/pkg/k8s/slim/k8s/apis/labels/selector.go:247-248`, `cilium/pkg/labels/array.go:148-153` (`LabelArray.Has`), `cilium/pkg/labels/labels.go:434-443` (`Label.HasKey`) |
+| Cilium itself selects the health endpoint with a CCNP `matchLabels: {'reserved:health': ''}` (allowing `remote-node` in and out); documented as "Example: Add Health Endpoint" | `cilium/examples/policies/kubernetes/clusterwide/health.yaml:1-13`, `cilium/Documentation/security/policy/kubernetes.rst:247-256` |
+| a policy selecting the health endpoint puts it into enforcement (observed in the first run: enforcement "both") | `cilium-dbg endpoint list` columns; first real run, not source |
+
+Not verified offline: that the cluster's Cilium (cilium-app 1.6.1) accepts the expression exactly like `main` does (the selector
+parsing above is long-standing, the health.yaml example is old); `ac2` lists the health endpoint's enforcement per agent
+(`Disabled/Disabled` expected) and compares `Cluster health` with the pre-deny baseline, which is the live proof. The other
+reserved identities without namespace labels (`reserved:init`, `reserved:ingress`, the host endpoint with the host firewall)
+are selected by the same `NotIn` and are NOT excluded by the kit.
+
+### `cilium-dbg identity list` output (ac1 identity check)
+
+| Fact | Evidence |
+|---|---|
+| default output is an `ID` / `LABELS` table: the first label on the ID line, one further label per line below, labels as `<source>:<key>[=<value>]` sorted | `cilium/pkg/identity/cache/cache.go:36-55` (`FormatIdentities`), `cilium/pkg/labels/labels.go:289-307` (`GetPrintableModel`), `:469-474` (`Label.String`) |
+| `--endpoints` lists the identities of locally managed endpoints with a third `REFCOUNT` column on the ID line | `cilium/cilium-dbg/cmd/identity_list.go:28-53`, `cilium/pkg/identity/identitymanager/manager.go:244-263` |
+| namespace labels are in the default identity label set, printed as `k8s:io.cilium.k8s.namespace.labels.<label key>=<value>`; the pod namespace as `k8s:io.kubernetes.pod.namespace=<ns>` | `cilium/pkg/labelsfilter/filter.go:228-229`, `cilium/pkg/k8s/apis/cilium.io/const.go:37-42` |
+| the plain list returns all known global identities of the agent's cache, not only local ones | `cilium/pkg/identity/api/identityapi.go:43-52`, `cilium/pkg/identity/cache/cache.go:104-130` |
+
+So the label text the first version of the kit grepped for was the right one; the check now also anchors it to the identity
+block of the probe namespace and asks the agent on the probe pod's node (see README "First real run").
+
+### Kyverno UpdateRequests (evidence of the generation checks)
+
+`kubectl -n kyverno get updaterequests.kyverno.io` (short name `ur`) lists what the admission webhook hands to the background
+controller: fields `spec.policy`, `spec.requestType`, `spec.resource.{kind,namespace,name}`, `status.state`
+(`kyverno/api/kyverno/v2/updaterequest_types.go:29,46-53,82-85`; identical at tags `v1.17.0` and `v1.18.2`). `ac5b`, `restart`
+and `bulk` print the count before and after the wait and dump the list.
+
 The PRD says cilium-app raises `bpf.policyMapMax` to 65536; the script reads the real value from `cm/cilium-config`
 key `bpf-policy-map-max` instead of assuming it. Not verified: the ConfigMap key name on AKS-managed Cilium.
 

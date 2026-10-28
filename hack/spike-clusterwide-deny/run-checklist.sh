@@ -746,7 +746,7 @@ identity_carries_labels() { # file namespace label...
 # 1 = identities were read but none carries them all, 2 = no agent / not readable (P_DETAIL set).
 ID_EVIDENCE=""
 ns_identity_has() { # ns pod allow...
-  local ns="$1" pod="$2" node ag out mode rc=2 labs="" x tmp
+  local ns="$1" pod="$2" node ag out mode labs="" x tmp
   shift 2
   for x in "$@"; do labs="$labs io.cilium.k8s.namespace.labels.$(label_key "$x")=true"; done
   node="$(K -n "$ns" get pod "$pod" -o jsonpath='{.spec.nodeName}' 2>/dev/null)"
@@ -754,21 +754,20 @@ ns_identity_has() { # ns pod allow...
   [ -n "$ag" ] || ag="$(first_agent)"
   if [ -z "$ag" ]; then P_DETAIL="no cilium agent pod found: identity not readable"; return 2; fi
   tmp="$(mktemp)" || { P_DETAIL="mktemp failed"; return 2; }
-  for mode in "identity list --endpoints" "identity list"; do
-    # shellcheck disable=SC2086 # mode is intentionally word-split
-    out="$(agent_exec "$ag" $mode)" || continue
-    [ -n "$out" ] || continue
-    rc=1
-    printf '%s\n' "$out" > "$tmp"
-    # shellcheck disable=SC2086 # labs is a word list
-    if identity_carries_labels "$tmp" "$ns" $labs; then rm -f "$tmp"; ID_EVIDENCE="agent $ag (${mode})"; return 0; fi
-    # a READABLE --endpoints list (identities of the live local endpoints) without the labels is final: the full list also holds
-    # stale identities of the same namespace (identity GC) that carried the labels earlier, and must not turn it into a pass
-    [ "$mode" = "identity list --endpoints" ] && break
-  done
+  # Only the identities of the live local endpoints count as proof. The full `identity list` also holds stale identities of
+  # the same namespace (identity GC window) that carried the labels earlier, so it is never a pass source: if --endpoints is
+  # unreadable or empty the answer is INCONCLUSIVE (rc 2), not a fallback.
+  mode="identity list --endpoints"
+  # shellcheck disable=SC2086 # mode is intentionally word-split
+  if ! out="$(agent_exec "$ag" $mode)" || [ -z "$out" ]; then
+    rm -f "$tmp"; P_DETAIL="agent $ag: '$mode' not readable or empty (the full identity list is not used as proof)"; return 2
+  fi
+  printf '%s\n' "$out" > "$tmp"
+  # shellcheck disable=SC2086 # labs is a word list
+  if identity_carries_labels "$tmp" "$ns" $labs; then rm -f "$tmp"; ID_EVIDENCE="agent $ag (${mode})"; return 0; fi
   rm -f "$tmp"
-  if [ "$rc" = 1 ]; then P_DETAIL="agent $ag: no identity of $ns carries all of:$(printf ' %s' "$@")"; else P_DETAIL="agent $ag: identity list not readable"; fi
-  return "$rc"
+  P_DETAIL="agent $ag: no live-endpoint identity of $ns carries all of:$(printf ' %s' "$@")"
+  return 1
 }
 AC1_ID_FILE=""; AC1_ID_MODE=""
 # 0 = found; 1 = identities were read but none carries both labels; 2 = no identity output could be read.

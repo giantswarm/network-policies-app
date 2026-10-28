@@ -55,6 +55,18 @@ LABEL_TIMEOUT="${SPIKE_LABEL_TIMEOUT:-60}"
 PRE_TIMEOUT="${SPIKE_PRE_TIMEOUT:-60}"
 LABEL_SETTLE="${SPIKE_LABEL_SETTLE:-40}"      # fixed wait after label changes whose effect cannot be polled (ac4, nodeny)
 LABEL_ROUNDS="${SPIKE_LABEL_ROUNDS:-3}"       # on/off rounds of ac5 in label mode
+# every timeout / window / round count is a positive integer (leading zeros stripped: no octal surprises, no `seq 1 0`)
+posint() { # NAME VALUE
+  case "$2" in ''|*[!0-9]*) echo "$1 must be a positive integer, got: '$2'" >&2; exit 2 ;; esac
+  if [ "${#2}" -gt 6 ] || [ "$((10#$2))" -lt 1 ]; then echo "$1 must be a positive integer (1-999999), got: '$2'" >&2; exit 2; fi
+}
+posint SPIKE_SYNC_TIMEOUT "$SYNC_TIMEOUT"; SYNC_TIMEOUT=$((10#$SYNC_TIMEOUT))
+posint SPIKE_FLIP_TIMEOUT "$FLIP_TIMEOUT"; FLIP_TIMEOUT=$((10#$FLIP_TIMEOUT))
+posint SPIKE_FLAP_SECONDS "$FLAP_SECONDS"; FLAP_SECONDS=$((10#$FLAP_SECONDS))
+posint SPIKE_LABEL_TIMEOUT "$LABEL_TIMEOUT"; LABEL_TIMEOUT=$((10#$LABEL_TIMEOUT))
+posint SPIKE_PRE_TIMEOUT "$PRE_TIMEOUT"; PRE_TIMEOUT=$((10#$PRE_TIMEOUT))
+posint SPIKE_LABEL_SETTLE "$LABEL_SETTLE"; LABEL_SETTLE=$((10#$LABEL_SETTLE))
+posint SPIKE_LABEL_ROUNDS "$LABEL_ROUNDS"; LABEL_ROUNDS=$((10#$LABEL_ROUNDS))
 if [ "$ALLOW_MODE" = label ]; then
   ALLOW_T="$LABEL_TIMEOUT"; ALLOW_WORD=label
   # seconds after the bulk label request at which `bulk` samples: the first one is later than the longest label latency (~35 s)
@@ -704,6 +716,47 @@ identity_carries_optout() { # file namespace
       if (lab == opt) hasopt = 1 }
     END { flush(); exit !found }' "$1"
 }
+# Does one identity block of `cilium-dbg identity list [--endpoints]` carry the pod-namespace label of $2 AND every label of the
+# rest (given as full `io.cilium.k8s.namespace.labels.<key>=<value>` strings)? Same block parsing as identity_carries_optout.
+identity_carries_labels() { # file namespace label...
+  local f="$1" ns="$2"
+  shift 2
+  awk -v ns="$ns" -v labs="$*" '
+    BEGIN { n = split(labs, want, " ") }
+    function flush(   i, c) { if (hasns) { c = 0; for (i = 1; i <= n; i++) if (want[i] in seen) c++; if (c == n) found = 1 }; delete seen; hasns = 0 }
+    { lab = $1
+      if ($1 ~ /^[0-9]+$/ && NF >= 2) { flush(); lab = $2 }
+      sub(/^[^:=]+:/, "", lab)
+      if (lab == "io.kubernetes.pod.namespace=" ns) hasns = 1
+      seen[lab] = 1 }
+    END { flush(); exit !found }' "$f"
+}
+# Positive proof that an allow label ACTS: the identity of the endpoints of namespace $1 (agent on the node of pod $2) carries
+# `k8s:io.cilium.k8s.namespace.labels.policy.giantswarm.io/allow-<x>=true` for every allow name given. 0 = all present,
+# 1 = identities were read but none carries them all, 2 = no agent / not readable (P_DETAIL set).
+ID_EVIDENCE=""
+ns_identity_has() { # ns pod allow...
+  local ns="$1" pod="$2" node ag out mode rc=2 labs="" x tmp
+  shift 2
+  for x in "$@"; do labs="$labs io.cilium.k8s.namespace.labels.$(label_key "$x")=true"; done
+  node="$(K -n "$ns" get pod "$pod" -o jsonpath='{.spec.nodeName}' 2>/dev/null)"
+  ag=""; [ -n "$node" ] && ag="$(agent_on_node "$node")"
+  [ -n "$ag" ] || ag="$(first_agent)"
+  if [ -z "$ag" ]; then P_DETAIL="no cilium agent pod found: identity not readable"; return 2; fi
+  tmp="$(mktemp)" || { P_DETAIL="mktemp failed"; return 2; }
+  for mode in "identity list --endpoints" "identity list"; do
+    # shellcheck disable=SC2086 # mode is intentionally word-split
+    out="$(agent_exec "$ag" $mode)" || continue
+    [ -n "$out" ] || continue
+    rc=1
+    printf '%s\n' "$out" > "$tmp"
+    # shellcheck disable=SC2086 # labs is a word list
+    if identity_carries_labels "$tmp" "$ns" $labs; then rm -f "$tmp"; ID_EVIDENCE="agent $ag"; return 0; fi
+  done
+  rm -f "$tmp"
+  if [ "$rc" = 1 ]; then P_DETAIL="agent $ag: no identity of $ns carries all of:$(printf ' %s' "$@")"; else P_DETAIL="agent $ag: identity list not readable"; fi
+  return "$rc"
+}
 AC1_ID_FILE=""; AC1_ID_MODE=""
 # 0 = found; 1 = identities were read but none carries both labels; 2 = no identity output could be read.
 # The agent output is captured into a variable and written to the evidence file BEFORE it is searched. (The first real run
@@ -770,10 +823,19 @@ not_ready_names() { # snapshot file -> sorted pod names that are not Running+rea
 
 # Re-apply the kit deny after the `nodeny` check deleted it. NODENY_ACTIVE stays 1 until the deny is verifiably back, so the
 # exit trap retries; a failure is loud and makes the script exit non-zero.
+NODENY_OLD_UID=""   # uid of the deny the nodeny check deleted
 restore_deny() {
+  local uid meta="$OUTDIR/baseline.meta"
   if K apply -f "$M/ccnp-default-deny-all-namespaces.yaml" >/dev/null && kexists "$CCNP" "$DENY_NAME"; then
     NODENY_ACTIVE=0
     DENY_APPLIED=1
+    # the re-applied deny has a new uid and a new start time: ac2 waits 40 s after DENY_AT_SEC, and its pre-deny baseline is tied
+    # to the deny uid. Re-tie it to the new uid when it was tied to the deleted one; any other baseline stays (correctly) invalid.
+    DENY_AT_SEC=$SECONDS
+    uid="$(K get "$CCNP" "$DENY_NAME" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
+    if [ -n "$uid" ] && [ -n "$NODENY_OLD_UID" ] && [ -s "$meta" ] && [ "$(sed -n 's/^denyuid=//p' "$meta")" = "$NODENY_OLD_UID" ]; then
+      { grep -v '^denyuid=' "$meta"; echo "denyuid=$uid"; } > "$meta.new" && mv "$meta.new" "$meta"
+    fi
     echo "clusterwide deny ${DENY_NAME} re-applied"
     return 0
   fi
@@ -1135,6 +1197,18 @@ preflight() {
     # label mode needs Cilium >= 1.16 for enableDefaultDeny (PRD; see SOURCES.md): report what the cluster runs
     echo "allow mode: label (label-selected CCNPs, no Kyverno resources)"
     echo "cilium agent image(s): $(K -n kube-system get ds cilium -o jsonpath='{range .spec.template.spec.containers[*]}{.image}{" "}{end}' 2>/dev/null || true) (enableDefaultDeny needs Cilium >= 1.16)"
+    if [ "$(n_allows)" != 5 ]; then
+      echo "REFUSING: label mode needs exactly 5 standard allows in $M/standard-allows/ (allow-{dns,kube-apiserver,webhook-ingress,ingress-controller,metrics-scraping}.yaml), found $(n_allows): '${LABEL_ALLOWS}'" >&2
+      return 1
+    fi
+    # leftovers of a kyverno-mode run would generate CNPs next to the label CCNPs and make every label result meaningless
+    local lg lc
+    lg="$(K get "$GPOL" -l "$OWNER_SEL" -o name 2>/dev/null | grep '/' || true)"
+    lc="$(K get "$CNP" --all-namespaces -l "$OWNER_SEL" -o name 2>/dev/null | grep "/${KIT}-allow-" || true)"
+    if [ -n "$lg$lc" ]; then
+      echo "REFUSING: leftovers of a kyverno-mode run exist (GeneratingPolicies: $(echo "$lg" | tr '\n' ' ')generated CNPs: $(echo "$lc" | tr '\n' ' ')): run '$(cleanup_cmd)' first" >&2
+      return 1
+    fi
   fi
 
   foreign="$(foreign_objects)"
@@ -1580,6 +1654,19 @@ EOF
   sleep 10
   # label mode: the last label may need ~35 s to reach the identities (and so the policy maps): wait before measuring
   [ "$ALLOW_MODE" = label ] && sleep "$LABEL_SETTLE"
+  if [ "$ALLOW_MODE" = label ]; then
+    # measure only with all allow labels on the namespace AND acting (in the identity): otherwise the map is not the one asked about
+    local nl irc
+    nl="$(count_allow_labels "$NS_ALL")"
+    # shellcheck disable=SC2086 # LABEL_ALLOWS is a word list
+    eventually "$LABEL_TIMEOUT" 3 ns_identity_has "$NS_ALL" client $LABEL_ALLOWS; irc=$?
+    if [ "$nl" != "$(n_allows)" ] || [ "$irc" -ne 0 ]; then
+      K -n "$NS_ALL" delete pods -l "load,${OWNER_SEL}" --wait=false >/dev/null 2>&1 || true
+      delete_owned "$CCNP" "$DNS_ALLOW_NAME"; unlabel_allow_all "$NS_ALL"; delete_same_ns "$NS_ALL"
+      result ac4 INCONCLUSIVE "allow labels on $NS_ALL: ${nl}/$(n_allows); identity carries all of them: $([ "$irc" -eq 0 ] && echo yes || echo "NO (${P_DETAIL})"): the map was not measured with all allows acting"
+      return
+    fi
+  fi
   if [ "$ALLOW_MODE" = kyverno ] && lost="$(lost_allows "$NS_ALL")"; then
     K -n "$NS_ALL" delete pods -l "load,${OWNER_SEL}" --wait=false >/dev/null 2>&1 || true
     delete_owned "$CCNP" "$DNS_ALLOW_NAME"
@@ -2005,7 +2092,9 @@ ac5_label_onoff() {
   apiserver_url || { result ac5 INCONCLUSIVE "$P_DETAIL"; return; }
   step "API server blocked before the first label" "precondition: the API server is reachable from $NS_A without the allow label (is the clusterwide deny applied?)" \
     eventually "$PRE_TIMEOUT" 2 expect_blocked "$NS_A" "$API_URL" || { finish ac5; return; }
-  for r in $(seq 1 "$LABEL_ROUNDS"); do
+  r=0
+  while [ "$r" -lt "$LABEL_ROUNDS" ]; do
+    r=$((r + 1))
     nrounds=$r
     label_allow "$NS_A" kube-apiserver || { finish ac5; return; }
     t0=$SECONDS
@@ -2039,7 +2128,7 @@ ac5_label_onoff() {
 ac_flap_label() {
   reset_state; begin
   local f_watch="$OUTDIR/flap-watch.txt" f_probe="$OUTDIR/flap-probe.txt" u0="$OUTDIR/flap-uids-before.txt" u1="$OUTDIR/flap-uids-after.txt"
-  local srv url end i wpid wpid2 ppid_ nd total failhttp faildns changed uperr=0
+  local srv url end i wpid wpid2 ppid_ nd total failhttp faildns changed nadd uperr=0
   mkdir -p "$OUTDIR"; : > "$f_watch"; : > "$f_probe"
   flap_uids() { { K get "$CCNP" -l "$OWNER_SEL" -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.uid} {.metadata.creationTimestamp}{"\n"}{end}' 2>/dev/null; cnp_uids "$NS_A"; } | sort; }
   label_allow_each "$NS_A" || { finish flap; return; }
@@ -2077,8 +2166,10 @@ ac_flap_label() {
   nd="$(awk '$2=="MARK"{m=1;next} m&&$2=="DELETED"{n++} END{print n+0}' "$f_watch")"
   total="$(awk '$1=="TOTAL"{print $2}' "$f_probe")"
   failhttp="$(grep -c '^FAIL http' "$f_probe")"; faildns="$(grep -c '^FAIL dns' "$f_probe")"
-  changed="$(diff "$u0" "$u1" | grep -c '^>')"
-  ev "${i} rounds of unrelated Namespace updates; DELETED events for label CCNPs / $SAME_NS_CNP during the updates: ${nd}; objects whose uid/creationTimestamp changed: ${changed}"
+  changed="$(diff "$u0" "$u1" | grep -c '^[<>]')"   # lines only in before (deleted/changed) or only in after (created/changed)
+  # the watch must have seen the initial objects (ADDED before the mark): 5 label CCNPs + the Same-namespace policy at least
+  nadd="$(awk '$2=="MARK"{m=1} !m&&$2=="ADDED"{n++} END{print n+0}' "$f_watch")"
+  ev "${i} rounds of unrelated Namespace updates; DELETED events for label CCNPs / $SAME_NS_CNP during the updates: ${nd}; objects whose uid/creationTimestamp changed or went missing: ${changed}; watch saw ${nadd} initial objects"
   ev "probe loop: ${total:-?} iterations, failed http: ${failhttp}, failed dns: ${faildns} (raw: $f_probe, $f_watch)"
   if [ "$ERR" = 1 ]; then
     result flap ERROR "$EV"
@@ -2087,6 +2178,8 @@ ac_flap_label() {
     result flap INCONCLUSIVE "$EV"
   elif [ "$nd" != 0 ] || [ "$changed" != 0 ]; then
     result flap FAIL "$EV: label mode must not delete or recreate anything on unrelated Namespace updates"
+  elif [ "${nadd:-0}" -lt $(( $(n_allows) + 1 )) ] || [ ! -s "$u0" ]; then
+    result flap INCONCLUSIVE "$EV: the watch did not see the initial objects (expected at least $(( $(n_allows) + 1 )) ADDED events), so 'nothing deleted' is not proven"
   elif [ "$failhttp" != 0 ] || [ "$faildns" != 0 ]; then
     result flap FINDING "$EV: nothing was deleted or recreated, but the probe saw failures during unrelated Namespace updates (label changes recompute the namespace's identities): size them against the SLO of labeled namespaces; raw: $f_probe"
   else
@@ -2173,6 +2266,16 @@ nodeny_body() {
   label_allow_bulk "$NS_NODENY" || return 1
   apply_same_ns "$NS_NODENY" || return 1
   ev "set all $(n_allows) allow labels (one request) + $SAME_NS_CNP in $NS_NODENY"
+  # no PASS without proof that the labels act: every allow label must be in the identity of the namespace's endpoints, read from
+  # the agent on the probe pod's node. Not readable / missing = INCONCLUSIVE (a vacuous "not restricted" is not a result).
+  t0=$SECONDS
+  # shellcheck disable=SC2086 # LABEL_ALLOWS is a word list
+  eventually "$LABEL_TIMEOUT" 3 ns_identity_has "$NS_NODENY" client $LABEL_ALLOWS; i=$?
+  if [ "$i" -ne 0 ]; then
+    ev "NOT verified: the identity of $NS_NODENY endpoints does not carry all allow labels within ${LABEL_TIMEOUT}s (${P_DETAIL})"; INCONC=1
+    return 0
+  fi
+  ev "identity of $NS_NODENY endpoints carries all $(n_allows) allow labels after $((SECONDS - t0))s (${ID_EVIDENCE})"
   t0=$SECONDS
   # probe the whole settle window every ~5 s: a restriction that appears when the labels take effect (up to ~35 s) is caught
   while :; do
@@ -2199,19 +2302,34 @@ nodeny_body() {
   fi
   return 0
 }
+# non-blocking namespace delete, owner-checked (the nodeny check must not wait for namespace termination)
+delete_owned_nowait() { # kind name
+  local rc
+  owner_label "$@"; rc=$?
+  [ "$rc" -eq 1 ] && return 0
+  [ "$rc" -eq 0 ] && [ "$OWNER_OUT" = "$OWNER_VAL" ] || return 1
+  K delete "$1" "$2" --ignore-not-found --wait=false >/dev/null 2>&1
+}
 ac_nodeny() {
   reset_state; begin
   local rc deny_was=0 gone_rc
+  # a failed reset_state means the cluster is not in a known state: never delete the deny on top of that
+  if [ "$ERR" = 1 ]; then finish nodeny; return; fi
   kexists "$CCNP" "$DENY_NAME"; rc=$?
   case "$rc" in
     2) fail_op "cannot check for the kit deny: ${P_DETAIL}"; finish nodeny; return ;;
-    1) ev "the kit deny $DENY_NAME is not applied: nothing to delete or restore" ;;
+    1)
+      # the deny should be there (setup applied it): missing is an error, never a PASS "without the deny"
+      fail_op "the kit deny $DENY_NAME is MISSING before the check: nothing to test against, and the run is not in the state it should be in"
+      if [ "$DENY_APPLIED" = 1 ]; then restore_deny || fail_op "re-applying the deny FAILED too"; fi
+      finish nodeny; return ;;
     0)
       owner_label "$CCNP" "$DENY_NAME"; rc=$?
       if [ "$rc" -ne 0 ] || [ "$OWNER_OUT" != "$OWNER_VAL" ]; then
         fail_op "REFUSING to delete $DENY_NAME: it does not carry ${OWNER_SEL} (or cannot be read)"; finish nodeny; return
       fi
       deny_was=1
+      NODENY_OLD_UID="$(K get "$CCNP" "$DENY_NAME" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
       NODENY_ACTIVE=1   # from here on the exit trap re-applies the deny, also when this function is interrupted
       delete_owned "$CCNP" "$DENY_NAME" || fail_op "deleting $DENY_NAME FAILED"
       eventually 60 2 ccnp_gone "$DENY_NAME"; gone_rc=$?
@@ -2219,13 +2337,14 @@ ac_nodeny() {
       ;;
   esac
   [ "$ERR" = 0 ] && nodeny_body
-  # the check's own namespace (labels, Same-namespace policy and pods go with it), then the deny comes back whatever happened above
-  delete_owned namespaces "$NS_NODENY" || fail_op "deleting namespace $NS_NODENY FAILED"
+  # the deny comes back FIRST, whatever happened above; only then is the check's own namespace deleted (without waiting)
   if [ "$deny_was" = 1 ]; then
     if restore_deny; then
+      delete_owned_nowait namespaces "$NS_NODENY" || fail_op "deleting namespace $NS_NODENY FAILED"
       step "deny re-applied: same-namespace blocked again after @T@s" "deny re-applied but same-namespace NOT blocked again within ${PRE_TIMEOUT}s" eventually "$PRE_TIMEOUT" 2 expect_blocked "$NS_A" "$NS_A"
     else
       fail_op "the clusterwide deny could NOT be re-applied (see the message above); the exit trap retries"
+      delete_owned_nowait namespaces "$NS_NODENY" || true
     fi
   fi
   finish nodeny
@@ -2285,10 +2404,18 @@ ac6_webhook_ingress() {
   if [ "$ALLOW_MODE" = label ]; then
     # the label CCNP needs up to ~35 s to act: poll the connection delta until the API server gets through
     label_delta_positive() { gen="$(delta)"; [ "$gen" -gt 0 ]; }
-    allow_on "$NS_WEBHOOK" webhook-ingress
-    step "label CCNP $(label_cnp_name webhook-ingress) (ports 443/4443/8443/9443/10250): the API server reached the listener after @T@s" "label CCNP $(label_cnp_name webhook-ingress): the API server did NOT reach the listener within ${ALLOW_T}s" eventually "$ALLOW_T" 2 label_delta_positive
-    ev "label CCNP connection delta on the last poll: ${gen:-?}"
-    allow_off "$NS_WEBHOOK" webhook-ingress
+    label_delta_zero() { gen="$(delta)"; [ "$gen" -eq 0 ]; }
+    # precondition: with the last variant CNP deleted and no label, the API server must be blocked again (poll: deleting the
+    # variant CNP takes effect asynchronously)
+    if eventually "$ALLOW_T" 2 label_delta_zero; then
+      allow_on "$NS_WEBHOOK" webhook-ingress
+      step "label CCNP $(label_cnp_name webhook-ingress) (ports 443/4443/8443/9443/10250): the API server reached the listener after @T@s" "label CCNP $(label_cnp_name webhook-ingress): the API server did NOT reach the listener within ${ALLOW_T}s" eventually "$ALLOW_T" 2 label_delta_positive
+      ev "label CCNP connection delta on the last poll: ${gen:-?}"
+      allow_off "$NS_WEBHOOK" webhook-ingress
+      step "label removed: the API server is blocked again after @T@s" "label removed: the API server STILL reaches the listener after ${ALLOW_T}s" eventually "$ALLOW_T" 2 label_delta_zero
+    else
+      ev "precondition: the API server still reached the listener (delta ${gen:-?}) for ${ALLOW_T}s after the variant CNPs were deleted and with no label: the label CCNP cannot be judged"; INCONC=1
+    fi
   elif [ "$HAVE_GPOL" = 1 ]; then
     annotate "$NS_WEBHOOK" allow-webhook-ingress
     if eventually "$SYNC_TIMEOUT" 2 cnp_exists "$NS_WEBHOOK" "$(gname allow-webhook-ingress)"; then
@@ -2383,7 +2510,7 @@ ac_dns() {
 # ac7: L4-only DNS allow vs a customer L7 DNS rule (FQDN policy)
 ac7_l7_dns_interaction() {
   reset_state; begin
-  local allowed="${SPIKE_FQDN_ALLOWED:-example.com}" other="${SPIKE_FQDN_OTHER:-giantswarm.io}" a1 o1 a2 o2 widened=0 t_w
+  local allowed="${SPIKE_FQDN_ALLOWED:-example.com}" other="${SPIKE_FQDN_OTHER:-giantswarm.io}" a1 o1 a2 o2 widened=0 t_w irc
   cat <<EOF | K apply -f - >/dev/null
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -2435,6 +2562,15 @@ EOF
     result ac7 INCONCLUSIVE "$EV; the generated $(gname allow-dns) CNP did not appear within ${SYNC_TIMEOUT}s"
   else
     if [ "$ALLOW_MODE" = label ]; then
+      # no verdict without positive proof that the label ACTS: the allowed name resolves through the kit's own FQDN policy anyway,
+      # so "no widening" would otherwise be a vacuous PASS. The identity of the endpoints must carry the allow-dns label.
+      eventually "$ALLOW_T" 3 ns_identity_has "$NS_B" client dns; irc=$?
+      if [ "$irc" -ne 0 ]; then
+        result ac7 INCONCLUSIVE "$EV; the allow-dns label is not (verifiably) in the identity of the $NS_B endpoints after ${ALLOW_T}s (${P_DETAIL}): the label-selected allow was not shown to act, so widening cannot be judged"
+        delete_owned "$CNP" "$FQDN_CNP" "$NS_B"; allow_off "$NS_B" dns
+        return
+      fi
+      ev "identity of the $NS_B endpoints carries the allow-dns label (${ID_EVIDENCE})"
       # the label needs up to ~35 s to act and the allow is only visible through the widening itself: poll the other name for
       # ${ALLOW_T}s; one that never resolves in that window is "no widening"
       t_w=$SECONDS

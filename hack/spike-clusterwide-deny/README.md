@@ -63,9 +63,9 @@ Checks that differ in label mode (the others are shared; see the table below):
 | Check | Label mode |
 |---|---|
 | `same-ns` | additionally: same-namespace is denied without `ddn-spike-same-namespace`, allowed with it applied, and denied again after deleting it; cross-namespace stays blocked with it |
-| `ac5` | **kyverno mode:** **label on/off**: allow-kube-apiserver (probed by ClusterIP) labeled and unlabeled `SPIKE_LABEL_ROUNDS` (3) times; records the on and off latency of every round; removal must block every time (`FAIL` otherwise) |
-| `flap` | **kyverno mode:** all five labels + Same-namespace policy on a namespace, a continuous same-namespace + DNS probe loop, then unrelated Namespace updates (dummy label and annotation add/remove) for `SPIKE_FLAP_SECONDS`. `FAIL` if a label CCNP or the Same-namespace policy is deleted or recreated (label mode must delete nothing); probe failures during the updates are reported as `FINDING` (unrelated *label* changes recompute the namespace's identities) |
-| `bulk` | **kyverno mode:** all five labels in ONE request (fresh namespace `ddn-spike-bulk`) versus one by one (`ddn-spike-seq`), each with a probe pod. Samples at `SPIKE_BULK_SAMPLES` (default `45 90 150`, seconds after the bulk request, labeled with the real elapsed time): all five labels still present and the two probe-able allows (allow-kube-apiserver by ClusterIP, allow-dns) still working. Expected `PASS`; the time until the labels act is recorded |
+| `ac5` | **label on/off**: allow-kube-apiserver (probed by ClusterIP) labeled and unlabeled `SPIKE_LABEL_ROUNDS` (3) times; records the on and off latency of every round; removal must block every time (`FAIL` otherwise) |
+| `flap` | all five labels + Same-namespace policy on a namespace, a continuous same-namespace + DNS probe loop, then unrelated Namespace updates (dummy label and annotation add/remove) for `SPIKE_FLAP_SECONDS`. `FAIL` if a label CCNP or the Same-namespace policy is deleted or recreated (label mode must delete nothing); probe failures during the updates are reported as `FINDING` (unrelated *label* changes recompute the namespace's identities) |
+| `bulk` | all five labels in ONE request (fresh namespace `ddn-spike-bulk`) versus one by one (`ddn-spike-seq`), each with a probe pod. Samples at `SPIKE_BULK_SAMPLES` (default `45 90 150`, seconds after the bulk request, labeled with the real elapsed time): all five labels still present and the two probe-able allows (allow-kube-apiserver by ClusterIP, allow-dns) still working. Expected `PASS`; the time until the labels act is recorded |
 | `nodeny` | **`enableDefaultDeny: false` proof**, replaces `ac5b` and `restart`. See below |
 | `dns`, `apiserver`, `ac6`, `ac7`, `ac4` | same checks with the label instead of the annotation: `dns` and `apiserver` record on/off seconds; `ac6` polls the real `ddn-spike-label-allow-webhook-ingress` until the API server reaches the listener; `ac7` polls the other name for 60 s to see whether the label-selected allow-dns widens a customer L7 rule; `ac4` measures the policy map with the five labels + Same-namespace policy |
 
@@ -77,9 +77,14 @@ namespace (the PRD's `enableDefaultDeny` claim). The check deletes **only the ki
 five allow labels in one request and applies `ddn-spike-same-namespace`, and then probes for `SPIKE_LABEL_SETTLE` seconds (default 40,
 longer than the label latency): cross-namespace in both directions, same-namespace and, when it was reachable before, the external URL
 must stay reachable. It also prints Cilium's endpoint policy enforcement of the namespace's endpoints (informational:
-`Disabled/Disabled` expected) and whether the identity carries the allow-dns label. **The deny is always put back**: the check
+`Disabled/Disabled` expected) and whether the identity carries the allow-dns label. **The deny is always put back** (before the check's namespace is deleted, which does not wait for termination): the check
 re-applies it and verifies that it exists, and sets a flag first so the exit trap (INT, TERM, error exit, `exit` in the middle of the
-check) re-applies it too; when the re-apply fails the script prints the apply command and exits non-zero. It runs after `ac2` on
+check) re-applies it too; when the re-apply fails the script prints the apply command and exits non-zero. A missing deny at the start, or a failed `reset_state`, is an ERROR and the deny is never deleted on top of it. The check is
+INCONCLUSIVE, never PASS, unless all five allow labels are shown in the identity of the namespace's endpoints on the probe pod's node
+(the same proof `ac4` and `ac7` need before they judge). **If the script is killed with SIGKILL while `nodeny` runs, no trap can run and
+the cluster stays WITHOUT the deny**; put it back by hand:
+`kubectl --context <ctx> apply -f hack/spike-clusterwide-deny/manifests/ccnp-default-deny-all-namespaces.yaml` (or run `cleanup`).
+It runs after `ac2` on
 purpose: the re-applied deny has a new uid, and `ac2`'s pre-deny baseline is tied to the old one. Because the deny disappears for the
 duration of the check (a minute or two), run it only on the dedicated test cluster, like everything else here.
 

@@ -86,11 +86,13 @@ Evidence for `enableDefaultDeny: {ingress: false, egress: false}` in `manifests/
 | CCNP and CNP CRD schemas both define `spec.enableDefaultDeny` (and `specs[].enableDefaultDeny`) with `ingress`/`egress` booleans; the kit's CCNPs and CNP validate against them (checked offline with `jsonschema` after making unknown fields errors, with a negative control) | `cilium/pkg/k8s/apis/cilium.io/client/crds/v2/ciliumclusterwidenetworkpolicies.yaml:1769,5131`, `ciliumnetworkpolicies.yaml:1772,5134` |
 | In a CNP the peers `fromEndpoints: [{}]` / `toEndpoints: [{}]` get the policy's own namespace added when the selector names no namespace (`io.kubernetes.pod.namespace`) or namespace labels, so the Same-namespace policy opens only its own namespace; in a CCNP only an "has a namespace label" expression is added | `cilium/pkg/k8s/apis/cilium.io/utils/utils.go:120-152` (`getEndpointSelector`, namespace added at `:146-147`; clusterwide `Exists` at `:139-145`); note `kubernetes.rst:110-118` says the opposite for selectors that DO carry namespace labels (not restricted to the own namespace) |
 
-Not verified in the clone: that `enableDefaultDeny` exists **since Cilium 1.16.0** (the PRD's claim; the clone is a shallow `main`
-without release notes or tags) and which Cilium version cilium-app 1.6.1 ships (the PRD says 1.20.2). If a cluster's Cilium does not
-know the field, a structural CRD would prune it and every label allow would put labeled namespaces into default deny; `setup`
-warns when the field is missing after the apply, the preflight prints the agent image, and `nodeny` fails in that case. On AKS the Azure-managed
-Cilium version decides (PRD "AKS caveat"). The label latency (10-35 s) is a measurement from the CAPZ spike, not source.
+Verified against upstream tags: `enableDefaultDeny` (`DefaultDenyConfig`) is absent from `pkg/policy/api/rule.go` at `v1.15.0` and
+`v1.15.9` and present at `v1.16.0`, so it exists **since Cilium 1.16.0** (the clone itself is a shallow `main` without tags; this
+was checked on the upstream tags). cilium-app 1.6.1 ships Cilium appVersion 1.20.2. If a cluster's Cilium is older than 1.16 and
+does not know the field, a structural CRD would prune it and every label allow would put labeled namespaces into default deny;
+`setup` warns when the field is missing after the apply, the preflight prints the agent image, and `nodeny` fails in that case. On
+AKS the Azure-managed Cilium version decides (PRD "AKS caveat"). The label latency (10-35 s) is a measurement from the CAPZ spike,
+not source.
 
 ### Cilium health endpoint (`reserved:health`) and the deny
 

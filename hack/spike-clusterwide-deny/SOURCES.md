@@ -6,7 +6,11 @@ written against clones in the cabbage-plans `default-deny-netpol/.agents_source/
 Cilium is `main` (`c57b662efd03`), so Cilium field names are checked against upstream HEAD, not against the Cilium
 version of a given cluster.
 
-## Which Kyverno Giant Swarm deploys
+Label mode (the default, `SPIKE_ALLOW_MODE=label`) needs none of the Kyverno evidence: its only upstream dependency is Cilium's
+`enableDefaultDeny` (section "`enableDefaultDeny`" under Cilium below). The two Kyverno sections are kept for kyverno mode
+(historical, reproduces the results on giantswarm/roadmap#4339).
+
+## Which Kyverno Giant Swarm deploys (kyverno mode, historical)
 
 | Fact | Evidence |
 |---|---|
@@ -20,7 +24,7 @@ version of a given cluster.
 Not verified: that `kyverno-crds` 1.18.0 contains the `policies.kyverno.io` GeneratingPolicy CRD (it is the Kyverno
 1.18 CRD bundle, and `run-checklist.sh` preflight prints the served versions from the live cluster).
 
-## GeneratingPolicy (Kyverno v1.18.2)
+## GeneratingPolicy (Kyverno v1.18.2; kyverno mode, historical)
 
 | Field / behavior | Evidence |
 |---|---|
@@ -62,6 +66,31 @@ Namespace UPDATE on a busy cluster.
 | `cilium-dbg bpf policy get --all` dumps every endpoint policy map ("Endpoint ID:" header, rows start with `Allow`/`Deny`); `-n` skips identity lookups | `cilium/cilium-dbg/cmd/bpf_policy_get.go:36-53,56-92,155-190` |
 | `cilium-dbg endpoint list -o jsonpath` syntax; CiliumEndpoint `status.id` | `cilium/Documentation/cheatsheet.rst:71-73`, `cilium/Documentation/security/policy-creation.rst:90` |
 | policy map size flag `--bpf-policy-map-max`, default 16384 per endpoint (docs); hard compile-time upper bound `1<<16` | `cilium/Documentation/cmdref/cilium-agent.md:68`, `cilium/pkg/option/config.go:531-532` |
+
+### `enableDefaultDeny` (label-mode standard allows and Same-namespace policy)
+
+Evidence for `enableDefaultDeny: {ingress: false, egress: false}` in `manifests/standard-allows/*.yaml` and
+`manifests/same-namespace-policy.yaml`. Paths are in the cilium clone at
+`cabbage-plans/.claude/worktrees/agent-ab055d597bd3432b3/default-deny-netpol/.agents_source/cilium` (Cilium `main`,
+`c57b662efd03`, VERSION `1.21.0-dev`), so these are checked against upstream HEAD, not against the Cilium a cluster runs.
+
+| Fact | Evidence |
+|---|---|
+| `DefaultDenyConfig` has optional `ingress` and `egress` booleans; a `Rule` (so a CNP/CCNP spec) carries it as `enableDefaultDeny` | `cilium/pkg/policy/api/rule.go:32-46` (`DefaultDenyConfig`), `:122-139` (field `EnableDefaultDeny`, json `enableDefaultDeny`), `:199-202` (`WithEnableDefaultDeny`) |
+| Semantics: when not specified the default is true for each direction that has rules; if several policies apply, default deny is on when ANY requests it; "useful for broad-based network policies that will not cause endpoints to enter default-deny mode" | `cilium/pkg/policy/api/rule.go:122-138` (field comment) |
+| The default is filled in per direction at sanitize time (`len(Ingress)+len(IngressDeny) > 0` for ingress, likewise egress); only when the agent/operator flag is off is it forced to true | `cilium/pkg/policy/api/rule_validation.go:101-118` (`Sanitize`) |
+| The flag is `enable-non-default-deny-policies`, **default true**, a hidden flag | `cilium/pkg/option/config.go:935-936,1791-1792`, `cilium/pkg/defaults/defaults.go:518-519`, `cilium/pkg/option/flags.go:25-27` |
+| Per endpoint, ingress/egress default deny is set only by the selecting rules whose `DefaultDeny` is true (`r.DefaultDeny` -> `hasIngressDefaultDeny` / `hasEgressDefaultDeny`), so a selecting allow with `false` leaves the endpoint un-denied | `cilium/pkg/policy/repository.go:402-445` (`computePolicyEnforcementAndRules`) |
+| Documented: "Rules with `EnableDefaultDeny` disabled are ignored when determining the default mode"; worked example is a CCNP with `enableDefaultDeny: {egress: false, ingress: false}` that "can safely apply cluster-wide" | `cilium/Documentation/security/policy/intro.rst:57-64` and the example at `:71-100` |
+| **Does not cover L7:** "`EnableDefaultDeny` does not apply to layer-7 policy ... Adding a layer-7 rule that does not include a layer-7 allow-all will cause drops, even when default-deny is explicitly disabled" | `cilium/Documentation/security/policy/intro.rst:66-69`. This is why the label `allow-dns` is L4 only (no `rules.dns`) |
+| CCNP and CNP CRD schemas both define `spec.enableDefaultDeny` (and `specs[].enableDefaultDeny`) with `ingress`/`egress` booleans; the kit's CCNPs and CNP validate against them (checked offline with `jsonschema` after making unknown fields errors, with a negative control) | `cilium/pkg/k8s/apis/cilium.io/client/crds/v2/ciliumclusterwidenetworkpolicies.yaml:1769,5131`, `ciliumnetworkpolicies.yaml:1772,5134` |
+| In a CNP the peers `fromEndpoints: [{}]` / `toEndpoints: [{}]` get the policy's own namespace added when the selector names no namespace (`io.kubernetes.pod.namespace`) or namespace labels, so the Same-namespace policy opens only its own namespace; in a CCNP only an "has a namespace label" expression is added | `cilium/pkg/k8s/apis/cilium.io/utils/utils.go:120-152` (`getEndpointSelector`, namespace added at `:146-147`; clusterwide `Exists` at `:139-145`); note `kubernetes.rst:110-118` says the opposite for selectors that DO carry namespace labels (not restricted to the own namespace) |
+
+Not verified in the clone: that `enableDefaultDeny` exists **since Cilium 1.16.0** (the PRD's claim; the clone is a shallow `main`
+without release notes or tags) and which Cilium version cilium-app 1.6.1 ships (the PRD says 1.20.2). If a cluster's Cilium does not
+know the field, a structural CRD would prune it and every label allow would put labeled namespaces into default deny; `setup`
+warns when the field is missing after the apply, the preflight prints the agent image, and `nodeny` fails in that case. On AKS the Azure-managed
+Cilium version decides (PRD "AKS caveat"). The label latency (10-35 s) is a measurement from the CAPZ spike, not source.
 
 ### Cilium health endpoint (`reserved:health`) and the deny
 

@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Spike kit for giantswarm/roadmap#4339: validates the clusterwide deny, the clusterwide DNS allow and the
-# Kyverno GeneratingPolicy standard allows on ONE dedicated test workload cluster.
+# Spike kit for giantswarm/roadmap#4339: validates the clusterwide deny, the clusterwide DNS allow and the standard allows
+# on ONE dedicated test workload cluster. Two modes (SPIKE_ALLOW_MODE):
+#   label    (default) the standard allows are static label-selected CiliumClusterwideNetworkPolicies, switched with
+#            namespace labels policy.giantswarm.io/allow-<x>=true; the Same-namespace policy is a CNP applied per namespace.
+#   kyverno  (historical, reproduces the recorded results on #4339) Kyverno GeneratingPolicies generate one CNP per
+#            namespace from namespace annotations.
 #
 # Only kubectl is used. Everything this script creates is named ddn-spike-* (or lives in a ddn-spike-* namespace)
 # and carries the label
@@ -39,7 +43,26 @@ DROP_WINDOW="${SPIKE_DROP_WINDOW:-30}"
 SYNC_TIMEOUT="${SPIKE_SYNC_TIMEOUT:-90}"
 FLIP_TIMEOUT="${SPIKE_FLIP_TIMEOUT:-60}"
 FLAP_SECONDS="${SPIKE_FLAP_SECONDS:-60}"
-BULK_SAMPLES="${SPIKE_BULK_SAMPLES:-5 60 150 240}"   # seconds after the bulk annotation at which the `bulk` check counts the CNPs
+# Allow mode: label (default) = label-selected CCNPs, kyverno = Kyverno GeneratingPolicies (historical).
+ALLOW_MODE="${SPIKE_ALLOW_MODE:-label}"
+case "$ALLOW_MODE" in
+  label|kyverno) ;;
+  *) echo "SPIKE_ALLOW_MODE must be label or kyverno, got: $ALLOW_MODE" >&2; exit 2 ;;
+esac
+# A namespace label change goes through Cilium's identity recompute and takes up to ~35 s to act (PRD: 14-35 s on, 10-35 s off on
+# CAPZ), so every wait for a label effect is >= 60 s. PRE_TIMEOUT bounds the "is it blocked/reachable before we start" waits.
+LABEL_TIMEOUT="${SPIKE_LABEL_TIMEOUT:-60}"
+PRE_TIMEOUT="${SPIKE_PRE_TIMEOUT:-60}"
+LABEL_SETTLE="${SPIKE_LABEL_SETTLE:-40}"      # fixed wait after label changes whose effect cannot be polled (ac4, nodeny)
+LABEL_ROUNDS="${SPIKE_LABEL_ROUNDS:-3}"       # on/off rounds of ac5 in label mode
+if [ "$ALLOW_MODE" = label ]; then
+  ALLOW_T="$LABEL_TIMEOUT"; ALLOW_WORD=label
+  # seconds after the bulk label request at which `bulk` samples: the first one is later than the longest label latency (~35 s)
+  BULK_SAMPLES="${SPIKE_BULK_SAMPLES:-45 90 150}"
+else
+  ALLOW_T="$SYNC_TIMEOUT"; ALLOW_WORD=annotation
+  BULK_SAMPLES="${SPIKE_BULK_SAMPLES:-5 60 150 240}"   # seconds after the bulk annotation at which the `bulk` check counts the CNPs
+fi
 CURL_TIMEOUT=3
 SETTLE="${SPIKE_SETTLE:-6}"
 
@@ -50,6 +73,7 @@ NS_ALL=${KIT}-all
 NS_WEBHOOK=${KIT}-webhook
 NS_BULK=${KIT}-bulk   # created and deleted by the `bulk` check itself: always fresh
 NS_SEQ=${KIT}-seq     # one-by-one control of the `bulk` check
+NS_NODENY=${KIT}-nodeny   # created and deleted by the label-mode `nodeny` check
 OPTOUT_LABEL="policy.giantswarm.io/default-deny"
 
 # Kit object names (all ddn-spike-*): one place, used by setup, preflight, checks and cleanup.
@@ -61,6 +85,7 @@ KYV_CM="${KIT}-kyverno-replicas"
 DNS_PROBE_POD="${KIT}-dns-probe"
 FQDN_CNP="${KIT}-fqdn"
 WEBHOOK_CNP="${KIT}-webhook-ingress"
+SAME_NS_CNP="${KIT}-same-namespace"
 
 CCNP=ciliumclusterwidenetworkpolicies.cilium.io
 CNP=ciliumnetworkpolicies.cilium.io
@@ -78,11 +103,37 @@ done
 unset _f _b
 gname() { echo "${KIT}-$1"; } # annotation -> GeneratingPolicy name AND generated CiliumNetworkPolicy name
 
-# One source for the checks: name:function, in run order. `list`, --only validation and the driver derive from it.
-CHECKS="same-ns:same_ns_denied_unannotated ac1:ac1_optout_live_flip ac2:ac2_probes_hostnetwork ac3:ac3_aks_support \
+# Label mode: one source for the five standard allows: manifests/standard-allows/allow-<x>.yaml (CCNP ddn-spike-label-allow-<x>,
+# selecting namespaces labeled policy.giantswarm.io/allow-<x>=true). Order as in the PRD table.
+LABEL_ALLOWS=""
+for _x in dns kube-apiserver webhook-ingress ingress-controller metrics-scraping; do
+  [ -e "$M/standard-allows/allow-$_x.yaml" ] && LABEL_ALLOWS="${LABEL_ALLOWS:+$LABEL_ALLOWS }$_x"
+done
+unset _x
+label_key() { echo "policy.giantswarm.io/allow-$1"; }   # allow name -> namespace label key
+label_cnp_name() { echo "${KIT}-label-allow-$1"; }      # allow name -> CCNP name
+n_allows() { # number of label-mode standard allows (5)
+  # shellcheck disable=SC2086 # LABEL_ALLOWS is a word list
+  set -- $LABEL_ALLOWS; echo $#
+}
+
+# One source for the checks: name:function, in run order, per mode. `list`, --only validation and the driver derive from it.
+# nodeny (label mode) runs after ac2 on purpose: it deletes and re-applies the deny, which changes the deny uid that ac2's
+# pre-deny baseline is tied to.
+if [ "$ALLOW_MODE" = label ]; then
+  CHECKS="same-ns:same_ns_denied_unannotated ac1:ac1_optout_live_flip ac2:ac2_probes_hostnetwork ac3:ac3_aks_support \
+dns:ac_dns apiserver:ac_apiserver ac5:ac5_label_onoff flap:ac_flap_label bulk:ac_bulk_label nodeny:ac_nodeny \
+ac6:ac6_webhook_ingress ac7:ac7_l7_dns_interaction ac4:ac4_bpf_map_usage ac8:ac8_drops_gs_namespaces ac9:ac9_record_guidance"
+  OTHER_MODE_ONLY="ac5b restart"; OTHER_MODE=kyverno
+else
+  CHECKS="same-ns:same_ns_denied_unannotated ac1:ac1_optout_live_flip ac2:ac2_probes_hostnetwork ac3:ac3_aks_support \
 dns:ac_dns apiserver:ac_apiserver ac5:ac5_generate_sync ac5b:ac5b_generate_existing flap:ac_flap bulk:ac_bulk restart:ac_restart \
 ac6:ac6_webhook_ingress ac7:ac7_l7_dns_interaction ac4:ac4_bpf_map_usage ac8:ac8_drops_gs_namespaces ac9:ac9_record_guidance"
+  OTHER_MODE_ONLY="nodeny"; OTHER_MODE=label
+fi
 fn_for() { local c; for c in $CHECKS; do [ "${c%%:*}" = "$1" ] && { echo "${c#*:}"; return 0; }; done; return 1; }
+# hint for a name that exists only in the other mode
+other_mode_hint() { local c; for c in $OTHER_MODE_ONLY; do [ "$c" = "$1" ] && { echo " ('$1' exists only with SPIKE_ALLOW_MODE=${OTHER_MODE})"; return 0; }; done; return 0; }
 all_checks() { local c out=""; for c in $CHECKS; do out="${out:+$out,}${c%%:*}"; done; echo "$out"; }
 
 usage() {
@@ -91,9 +142,11 @@ Usage: $0 [options] <command>
 
 Commands:
   run       setup (idempotent), then run the checklist functions (default)
-  setup     apply probes, RBAC, GeneratingPolicies and the clusterwide deny
-  cleanup   restore Kyverno if scaled down, then delete everything carrying ${OWNER_SEL}, deny first
-  list      list the checklist functions
+  setup     apply probes, the standard allows (label mode: five label CCNPs; kyverno mode: RBAC + GeneratingPolicies) and
+            the clusterwide deny
+  cleanup   restore Kyverno if scaled down, then delete everything carrying ${OWNER_SEL}, deny first, and remove the allow
+            labels from the kit namespaces (label CCNPs and Same-namespace policies go by the owner label)
+  list      list the checklist functions of the selected mode
 
 Exit status of run: 0 when no check ended FAIL or ERROR; 1 otherwise; 2 for usage errors and when the safety gate refuses.
 
@@ -108,13 +161,25 @@ Safety gate: the clusterwide deny is only applied when SPIKE_CONFIRM equals the 
 actually be used (resolved with --kubeconfig/--context honoured, printed by the preflight), e.g.
   SPIKE_CONFIRM=my-test-wc $0 --context my-test-wc run
 
-Environment: SPIKE_IMAGE, SPIKE_PAUSE_IMAGE, SPIKE_CLUSTER_DOMAIN, SPIKE_EXTERNAL_URL, SPIKE_LOAD_PODS,
-SPIKE_DROP_WINDOW, SPIKE_SYNC_TIMEOUT, SPIKE_FLIP_TIMEOUT, SPIKE_FLAP_SECONDS, SPIKE_BULK_SAMPLES ("5 60 150 240"), SPIKE_SETTLE,
-SPIKE_ALLOW_KYVERNO_SCALE=true (opt in to the "Kyverno down" generate-existing test: scales ALL Kyverno
-deployments to 0; refused when a Kyverno webhook has failurePolicy Fail unless SPIKE_KYVERNO_SCALE_ALLOW_FAIL_CLOSED=true),
-SPIKE_SKIP_KYVERNO_RESTART=true (skip the background-controller restart check),
-SPIKE_ALLOW_NO_COREDNS_INGRESS=true (continue although no policy allowing ingress to CoreDNS was found),
-SPIKE_CLEANUP_ON_EXIT=true (on any exit, including Ctrl-C, run cleanup; default: leave the deny applied and say so).
+Environment:
+  SPIKE_ALLOW_MODE=label|kyverno   how the standard allows work (default label: label-selected CCNPs switched with namespace
+      labels; kyverno: the historical GeneratingPolicy mode that reproduces the results recorded on #4339)
+  SPIKE_IMAGE, SPIKE_PAUSE_IMAGE, SPIKE_CLUSTER_DOMAIN, SPIKE_EXTERNAL_URL, SPIKE_LOAD_PODS, SPIKE_DROP_WINDOW, SPIKE_SETTLE,
+  SPIKE_SYNC_TIMEOUT (90), SPIKE_FLIP_TIMEOUT (60), SPIKE_FLAP_SECONDS (60),
+  SPIKE_BULK_SAMPLES (label "45 90 150", kyverno "5 60 150 240"; seconds after the bulk label/annotation request),
+  SPIKE_HEALTH_WAIT (20, seconds the pre-deny baseline waits per agent for Cilium cluster health to reach N/N),
+  SPIKE_ANNOTATE_GAP (2, seconds between one-at-a-time label/annotation requests, both modes),
+  label mode: SPIKE_LABEL_TIMEOUT (60, wait for a label to act: it needs up to ~35 s), SPIKE_PRE_TIMEOUT (60, wait for a
+      precondition), SPIKE_LABEL_SETTLE (40, fixed wait where the effect cannot be polled), SPIKE_LABEL_ROUNDS (3, ac5),
+  kyverno mode: SPIKE_GEN_FN (apply|Apply, the CEL generator function; default read from the Kyverno version),
+      SPIKE_GPOL_WEBHOOK (shared|finegrained),
+      SPIKE_GPOL_TIMEOUT (10, webhook timeout 1-30 for finegrained), SPIKE_GPOL_MATCHCOND (none|owner),
+      SPIKE_ALLOW_KYVERNO_SCALE=true (opt in to the "Kyverno down" generate-existing test: scales ALL Kyverno deployments to 0;
+      refused when a Kyverno webhook has failurePolicy Fail unless SPIKE_KYVERNO_SCALE_ALLOW_FAIL_CLOSED=true),
+      SPIKE_SKIP_KYVERNO_RESTART=true (skip the background-controller restart check),
+      SPIKE_ALLOW_NO_KYVERNO_INGRESS=true (continue although nothing lets the API server reach the Kyverno admission controller),
+  SPIKE_ALLOW_NO_COREDNS_INGRESS=true (continue although no policy allowing ingress to CoreDNS was found),
+  SPIKE_CLEANUP_ON_EXIT=true (on any exit, including Ctrl-C, run cleanup; default: leave the deny applied and say so).
 EOF
 }
 
@@ -194,6 +259,7 @@ KYV_SCALED=0
 KYV_SAVED=""   # "<deployment> <replicas>" lines of the deployments THIS run scaled down (in-memory copy of the ConfigMap)
 DENY_APPLIED=0
 DENY_AT_SEC=""
+NODENY_ACTIVE=0   # 1 while the label-mode `nodeny` check has the kit deny CCNP deleted: the exit trap must re-apply it
 CLEANING=0
 TOUCHED=0
 BG_PIDS=()
@@ -210,6 +276,10 @@ on_exit() {
   if [ "$KYV_SCALED" = 1 ]; then
     echo "!! exiting while Kyverno is scaled down: restoring the saved replica counts (signals are ignored until this is done)" >&2
     restore_kyverno
+  fi
+  if [ "$NODENY_ACTIVE" = 1 ]; then
+    echo "!! exiting while the clusterwide deny is deleted by the nodeny check: re-applying it (signals are ignored until this is done)" >&2
+    restore_deny
   fi
   if [ "$DENY_APPLIED" = 1 ] && [ "$CLEANING" = 0 ]; then
     if [ "${SPIKE_CLEANUP_ON_EXIT:-}" = "true" ]; then
@@ -234,8 +304,8 @@ on_exit() {
       echo "!! they are left behind. Remove them with: $(cleanup_cmd)"
     } >&2 2>/dev/null || true
   fi
-  # Kyverno still scaled down after every restore attempt: never exit 0
-  if [ "$KYV_SCALED" = 1 ] && [ "$rc" -eq 0 ]; then rc=1; fi
+  # Kyverno still scaled down, or the deny still deleted, after every restore attempt: never exit 0
+  if { [ "$KYV_SCALED" = 1 ] || [ "$NODENY_ACTIVE" = 1 ]; } && [ "$rc" -eq 0 ]; then rc=1; fi
   exit "$rc"
 }
 on_signal() { echo "!! interrupted (${1})" >&2 2>/dev/null || true; exit "$2"; }
@@ -424,6 +494,51 @@ unannotate_all() { # ns: one request, so one Namespace UPDATE
   for a in $GEN_ANNOTATIONS; do args+=("policy.giantswarm.io/$a-"); done
   K annotate namespace "$1" "${args[@]}" >/dev/null || { fail_op "removing the annotations from namespace $1 FAILED"; return 1; }
 }
+# ---- label mode: allow labels on namespaces -----------------------------------------------------------------
+# Label writes check kubectl's exit code; a failure is recorded as an ERROR in the current check.
+label_allow() { # ns allow
+  K label namespace "$1" "$(label_key "$2")=true" --overwrite >/dev/null || { fail_op "labelling namespace $1 with $(label_key "$2") FAILED"; return 1; }
+}
+unlabel_allow() { # ns allow
+  K label namespace "$1" "$(label_key "$2")-" >/dev/null || { fail_op "removing $(label_key "$2") from namespace $1 FAILED"; return 1; }
+}
+# One label per request, SPIKE_ANNOTATE_GAP (2) seconds apart: what a controller adding the labels one at a time does.
+label_allow_each() { local x; for x in $LABEL_ALLOWS; do label_allow "$1" "$x" || return 1; sleep "${SPIKE_ANNOTATE_GAP:-2}"; done; }
+# All five labels in ONE request = ONE Namespace UPDATE.
+label_allow_bulk() { # ns
+  local x args=()
+  for x in $LABEL_ALLOWS; do args+=("$(label_key "$x")=true"); done
+  K label namespace "$1" "${args[@]}" --overwrite >/dev/null || { fail_op "labelling namespace $1 with all ${#args[@]} allow labels in one request FAILED"; return 1; }
+}
+unlabel_allow_all() { # ns: one request, so one Namespace UPDATE (removing an absent label is not an error)
+  local x args=()
+  for x in $LABEL_ALLOWS; do args+=("$(label_key "$x")-"); done
+  K label namespace "$1" "${args[@]}" >/dev/null || { fail_op "removing the allow labels from namespace $1 FAILED"; return 1; }
+}
+# Allow labels currently on a namespace, out of the five.
+count_allow_labels() { # ns -> number
+  local x n=0 v
+  for x in $LABEL_ALLOWS; do
+    v="$(K get namespace "$1" -o go-template="{{index .metadata.labels \"$(label_key "$x")\"}}" 2>/dev/null)"
+    [ "$v" = "true" ] && n=$((n + 1))
+  done
+  echo "$n"
+}
+# Same-namespace policy (manifests/same-namespace-policy.yaml, no namespace inside): applied per namespace, owner-labelled.
+apply_same_ns() { K -n "$1" apply -f "$M/same-namespace-policy.yaml" >/dev/null || { fail_op "applying $SAME_NS_CNP in $1 FAILED"; return 1; }; }
+delete_same_ns() { delete_owned "$CNP" "$SAME_NS_CNP" "$1" || { fail_op "deleting $SAME_NS_CNP in $1 FAILED"; return 1; }; }
+
+# Mode-agnostic switches for the checks that exist in both modes. x = dns | kube-apiserver | webhook-ingress | ingress-controller |
+# metrics-scraping (| same-namespace, kyverno mode only). Label mode sets/removes the namespace LABEL; kyverno mode the ANNOTATION.
+allow_on() { # ns x
+  if [ "$ALLOW_MODE" = label ]; then label_allow "$1" "$2"; else annotate "$1" "allow-$2"; fi
+}
+allow_off() { # ns x
+  if [ "$ALLOW_MODE" = label ]; then unlabel_allow "$1" "$2"; else unannotate "$1" "allow-$2"; fi
+}
+# Can the allows be exercised in this mode at all? Label mode always; kyverno mode needs the GeneratingPolicy CRD.
+have_allows() { [ "$ALLOW_MODE" = label ] || [ "$HAVE_GPOL" = 1 ]; }
+
 set_optout() { K label namespace "$1" "${OPTOUT_LABEL}=false" --overwrite >/dev/null || { fail_op "setting the opt-out label on $1 FAILED"; return 1; }; }
 unset_optout() { K label namespace "$1" "${OPTOUT_LABEL}-" >/dev/null || { fail_op "removing the opt-out label from $1 FAILED"; return 1; }; }
 
@@ -653,8 +768,27 @@ not_ready_names() { # snapshot file -> sorted pod names that are not Running+rea
   awk '$2=="Succeeded"{next} $2!="Running"{print $1; next} {l=$0; sub(/ restarts=.*/,"",l); if (l ~ /false/) print $1}' "$1" | sort -u
 }
 
-# Remove annotations/labels/policies that a previous function left behind so each function starts clean, and wait
-# until the generated CNPs are really gone (Kyverno synchronize deletes them asynchronously).
+# Re-apply the kit deny after the `nodeny` check deleted it. NODENY_ACTIVE stays 1 until the deny is verifiably back, so the
+# exit trap retries; a failure is loud and makes the script exit non-zero.
+restore_deny() {
+  if K apply -f "$M/ccnp-default-deny-all-namespaces.yaml" >/dev/null && kexists "$CCNP" "$DENY_NAME"; then
+    NODENY_ACTIVE=0
+    DENY_APPLIED=1
+    echo "clusterwide deny ${DENY_NAME} re-applied"
+    return 0
+  fi
+  {
+    echo "!! THE CLUSTERWIDE DENY ${DENY_NAME} IS MISSING (deleted by the nodeny check, re-apply FAILED) on context '${KCTX}'"
+    echo "!! re-apply with: $(kubectl_prefix) apply -f $M/ccnp-default-deny-all-namespaces.yaml"
+    echo "!! or remove the whole kit with: $(cleanup_cmd)"
+  } >&2
+  NODENY_ACTIVE=1
+  return 1
+}
+
+# Remove annotations/labels/policies that a previous function left behind so each function starts clean, and (kyverno mode) wait
+# until the generated CNPs are really gone (Kyverno synchronize deletes them asynchronously). Label mode removes the allow
+# labels and the Same-namespace policies; it does not wait for the label effect (every check waits for its own precondition).
 reset_state() {
   local ns left rc
   ERR=0; EV=""
@@ -664,7 +798,12 @@ reset_state() {
       1) continue ;;
       2) fail_op "reset: $P_DETAIL"; continue ;;
     esac
-    unannotate_all "$ns"
+    if [ "$ALLOW_MODE" = label ]; then
+      unlabel_allow_all "$ns"
+      delete_same_ns "$ns"
+    else
+      unannotate_all "$ns"
+    fi
     unset_optout "$ns"
   done
   delete_owned "$CCNP" "$DNS_ALLOW_NAME" || fail_op "reset: could not delete $DNS_ALLOW_NAME"
@@ -815,11 +954,15 @@ foreign_objects() {
     esac
   }
   chk "$CCNP" "$DENY_NAME"; chk "$CCNP" "$DNS_ALLOW_NAME"
-  chk "$CROLE" "$RBAC_NAME"; chk "$VWC" "$WEBHOOK_CFG"
-  for ns in "$NS_A" "$NS_B" "$NS_OPTOUT" "$NS_ALL" "$NS_WEBHOOK" "$NS_BULK" "$NS_SEQ"; do chk namespaces "$ns"; done
-  chk configmaps "$KYV_CM" kyverno
+  for ns in "$NS_A" "$NS_B" "$NS_OPTOUT" "$NS_ALL" "$NS_WEBHOOK" "$NS_BULK" "$NS_SEQ" "$NS_NODENY"; do chk namespaces "$ns"; done
   chk pods "$DNS_PROBE_POD" kube-system; chk pods "$DNS_PROBE_POD" giantswarm
-  for a in $GEN_ANNOTATIONS; do chk "$GPOL" "$(gname "$a")"; done
+  if [ "$ALLOW_MODE" = label ]; then
+    for a in $LABEL_ALLOWS; do chk "$CCNP" "$(label_cnp_name "$a")"; done
+  else
+    chk "$CROLE" "$RBAC_NAME"; chk "$VWC" "$WEBHOOK_CFG"
+    chk configmaps "$KYV_CM" kyverno
+    for a in $GEN_ANNOTATIONS; do chk "$GPOL" "$(gname "$a")"; done
+  fi
   echo "$out"
 }
 
@@ -971,21 +1114,28 @@ preflight() {
   K get ns kube-system >/dev/null 2>&1 || { echo "cluster unreachable" >&2; return 1; }
   K get crd ciliumclusterwidenetworkpolicies.cilium.io >/dev/null 2>&1 \
     || { echo "CCNP CRD missing: is Cilium installed?" >&2; return 1; }
-  if K get crd generatingpolicies.policies.kyverno.io >/dev/null 2>&1; then
-    HAVE_GPOL=1
-    echo "GeneratingPolicy CRD versions: $(K get crd generatingpolicies.policies.kyverno.io -o jsonpath='{range .spec.versions[*]}{.name}{"(served="}{.served}{",storage="}{.storage}{") "}{end}')"
+  HAVE_GPOL=0
+  if [ "$ALLOW_MODE" = kyverno ]; then
+    echo "allow mode: kyverno (historical GeneratingPolicy mode)"
+    if K get crd generatingpolicies.policies.kyverno.io >/dev/null 2>&1; then
+      HAVE_GPOL=1
+      echo "GeneratingPolicy CRD versions: $(K get crd generatingpolicies.policies.kyverno.io -o jsonpath='{range .spec.versions[*]}{.name}{"(served="}{.served}{",storage="}{.storage}{") "}{end}')"
+    else
+      echo "WARNING: GeneratingPolicy CRD missing (kyverno-crds / security-bundle not installed): generate checks will be MANUAL"
+    fi
+    echo "kyverno image(s): $(K -n kyverno get deploy -o jsonpath='{range .items[*]}{.spec.template.spec.containers[0].image}{" "}{end}' 2>/dev/null)"
+    if [ -z "${SPIKE_GEN_FN:-}" ]; then
+      kyv_minor="$(K -n kyverno get deploy -o jsonpath='{range .items[*]}{.spec.template.spec.containers[0].image}{"\n"}{end}' 2>/dev/null \
+        | sed -n 's|.*/kyverno:v1\.\([0-9][0-9]*\)\..*|\1|p' | head -n 1)"
+      if [ -n "$kyv_minor" ] && [ "$kyv_minor" -lt 18 ]; then GEN_FN=Apply; fi
+      echo "kyverno minor version: ${kyv_minor:-unknown} -> CEL generator.${GEN_FN}() (override with SPIKE_GEN_FN)"
+    fi
+    echo "kyverno CiliumNetworkPolicies: $(K -n kyverno get "$CNP" -o name 2>/dev/null | tr '\n' ' ')"
   else
-    HAVE_GPOL=0
-    echo "WARNING: GeneratingPolicy CRD missing (kyverno-crds / security-bundle not installed): generate checks will be MANUAL"
+    # label mode needs Cilium >= 1.16 for enableDefaultDeny (PRD; see SOURCES.md): report what the cluster runs
+    echo "allow mode: label (label-selected CCNPs, no Kyverno resources)"
+    echo "cilium agent image(s): $(K -n kube-system get ds cilium -o jsonpath='{range .spec.template.spec.containers[*]}{.image}{" "}{end}' 2>/dev/null || true) (enableDefaultDeny needs Cilium >= 1.16)"
   fi
-  echo "kyverno image(s): $(K -n kyverno get deploy -o jsonpath='{range .items[*]}{.spec.template.spec.containers[0].image}{" "}{end}' 2>/dev/null)"
-  if [ -z "${SPIKE_GEN_FN:-}" ]; then
-    kyv_minor="$(K -n kyverno get deploy -o jsonpath='{range .items[*]}{.spec.template.spec.containers[0].image}{"\n"}{end}' 2>/dev/null \
-      | sed -n 's|.*/kyverno:v1\.\([0-9][0-9]*\)\..*|\1|p' | head -n 1)"
-    if [ -n "$kyv_minor" ] && [ "$kyv_minor" -lt 18 ]; then GEN_FN=Apply; fi
-    echo "kyverno minor version: ${kyv_minor:-unknown} -> CEL generator.${GEN_FN}() (override with SPIKE_GEN_FN)"
-  fi
-  echo "kyverno CiliumNetworkPolicies: $(K -n kyverno get "$CNP" -o name 2>/dev/null | tr '\n' ' ')"
 
   foreign="$(foreign_objects)"
   if [ -n "$foreign" ]; then
@@ -994,7 +1144,7 @@ preflight() {
     return 1
   fi
 
-  if [ "$HAVE_GPOL" = 1 ]; then
+  if [ "$ALLOW_MODE" = kyverno ] && [ "$HAVE_GPOL" = 1 ]; then
     local fg
     if fg="$(K get "$GPOL" -l "!${OWNER_KEY}" -o name 2>/dev/null)"; then
       fg="$(echo "$fg" | grep '/')"   # only resource names, never kubectl warning lines
@@ -1029,7 +1179,7 @@ preflight() {
     echo "node-local DNS cache pods present: confirm that an ingress allow for k8s-dns-node-cache exists too (the dns check will show it)"
   fi
 
-  if [ "$HAVE_GPOL" = 1 ] || K -n kyverno get deploy -l app.kubernetes.io/component=admission-controller -o name 2>/dev/null | grep -q .; then
+  if [ "$ALLOW_MODE" = kyverno ] && { [ "$HAVE_GPOL" = 1 ] || K -n kyverno get deploy -l app.kubernetes.io/component=admission-controller -o name 2>/dev/null | grep -q .; }; then
     kall="$(kyverno_ingress_candidates | sort -u)"
     kcand="$(echo "$kall" | sed -n 's/^STRONG //p' | tr '\n' ' ')"
     kweak="$(echo "$kall" | sed -n 's/^WEAK //p' | tr '\n' ';')"
@@ -1061,7 +1211,7 @@ setup() {
   echo "== applying probe workloads"
   TOUCHED=1
   apply_manifest "$M/probes/probes.yaml" || { echo "applying the probe workloads failed" >&2; return 1; }
-  local ns f a deny_pre=0 base_taken=0 base_rs="" BASE_HEALTH=""
+  local ns f a n deny_pre=0 base_taken=0 base_rs="" BASE_HEALTH=""
   for ns in "$NS_A" "$NS_B" "$NS_OPTOUT" "$NS_ALL"; do
     K -n "$ns" wait --for=condition=Ready pod/client pod/server --timeout=180s >/dev/null 2>&1 \
       || { echo "probe pods in $ns not Ready (image pull? set SPIKE_IMAGE)" >&2; return 1; }
@@ -1084,7 +1234,18 @@ setup() {
     base_rs="$(K -n "$NS_A" get pod server -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null)"
     base_taken=1
   fi
-  if [ "$HAVE_GPOL" = 1 ]; then
+  if [ "$ALLOW_MODE" = label ]; then
+    echo "== applying the five label-selected standard allows (CCNPs, enableDefaultDeny false/false)"
+    K apply -f "$M/standard-allows/" >/dev/null || { echo "applying the standard allows failed" >&2; return 1; }
+    for a in $LABEL_ALLOWS; do
+      n="$(label_cnp_name "$a")"
+      if [ -z "$(K get "$CCNP" "$n" -o jsonpath='{.spec.enableDefaultDeny}' 2>/dev/null)" ]; then
+        echo "WARNING: $n has no .spec.enableDefaultDeny after the apply: this Cilium dropped the field (older than 1.16?)." >&2
+        echo "         The allow would then put every labeled namespace into default deny for its direction; the nodeny check will show it." >&2
+      fi
+    done
+  fi
+  if [ "$ALLOW_MODE" = kyverno ] && [ "$HAVE_GPOL" = 1 ]; then
     echo "== applying Kyverno RBAC + GeneratingPolicies"
     K apply -f "$M/kyverno-rbac-ciliumnetworkpolicies.yaml" >/dev/null || { echo "applying the Kyverno RBAC failed" >&2; return 1; }
     for f in "$M"/generatingpolicies/*.yaml; do apply_gpol "$f" || { echo "apply failed: $f" >&2; return 1; }; done
@@ -1119,8 +1280,19 @@ cleanup() {
   local rc=0
   restore_kyverno || rc=1
   local kind ns
+  # CCNPs first: the deny (restores the cluster), the DNS allow and the five label-selected standard allows
   for kind in "$CCNP" "$GPOL" "$VWC" "$CROLE"; do
     K delete "$kind" -l "$OWNER_SEL" --ignore-not-found 2>&1 | sed 's/^/  /'
+  done
+  # Same-namespace policies and generated CNPs of the kit, in every namespace, by the owner label
+  K delete "$CNP" --all-namespaces -l "$OWNER_SEL" --ignore-not-found 2>&1 | sed 's/^/  /'
+  # Allow labels: only on kit namespaces (owner label), never on any other namespace. The namespaces are deleted below; this
+  # also leaves a kit namespace that cannot be deleted without allow labels.
+  local kitns x args=()
+  for x in $LABEL_ALLOWS; do args+=("$(label_key "$x")-"); done
+  kitns="$(K get namespaces -l "$OWNER_SEL" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)"
+  for ns in $kitns; do
+    [ "${#args[@]}" -gt 0 ] && K label namespace "$ns" "${args[@]}" 2>&1 | sed 's/^/  /'
   done
   for ns in kube-system giantswarm; do
     K -n "$ns" delete pods -l "$OWNER_SEL" --ignore-not-found --wait=false 2>&1 | sed 's/^/  /'
@@ -1133,23 +1305,35 @@ cleanup() {
     K delete namespaces -l "$OWNER_SEL" --ignore-not-found --wait=true --timeout=300s 2>&1 | sed 's/^/  /'
   fi
   echo "cleanup done. Remaining objects with the owner label (should be none):"
-  K get ns,"$CCNP","$GPOL","$CROLE" -l "$OWNER_SEL" --no-headers 2>/dev/null | sed 's/^/  /'
+  for kind in ns "$CCNP" "$GPOL" "$CROLE"; do   # one get per kind: a missing CRD (no Kyverno in label mode) must not hide the rest
+    K get "$kind" -l "$OWNER_SEL" --no-headers 2>/dev/null | sed 's/^/  /'
+  done
+  K get "$CNP" --all-namespaces -l "$OWNER_SEL" --no-headers 2>/dev/null | sed 's/^/  /'
   K get pods -A -l "$OWNER_SEL" --no-headers 2>/dev/null | sed 's/^/  /'
   return "$rc"
 }
 
 # ---------------------------------------------------------------------------------------------- functions
 # same-namespace traffic denied when unannotated; cross-namespace and internet denied too
+# Label mode adds the Same-namespace policy: denied without it, allowed with ddn-spike-same-namespace applied, denied again after.
 same_ns_denied_unannotated() {
   reset_state; begin
-  step "same-namespace blocked" "same-namespace NOT blocked" eventually 30 2 expect_blocked "$NS_A" "$NS_A"
-  step "cross-namespace blocked" "cross-namespace NOT blocked" eventually 30 2 expect_blocked "$NS_A" "$NS_B"
+  step "same-namespace blocked" "same-namespace NOT blocked" eventually "$PRE_TIMEOUT" 2 expect_blocked "$NS_A" "$NS_A"
+  step "cross-namespace blocked" "cross-namespace NOT blocked" eventually "$PRE_TIMEOUT" 2 expect_blocked "$NS_A" "$NS_B"
   if [ "$EXT_BASE" = 1 ]; then
     step "external ${EXTERNAL_URL} blocked" "external ${EXTERNAL_URL} answered" expect_blocked "$NS_A" "$EXTERNAL_URL"
   else
     ev "external ${EXTERNAL_URL} not asserted (no pre-deny baseline proving it was reachable)"
   fi
-  step "control: opted-out ns reachable" "control FAILED: opted-out ns not reachable" eventually 30 2 expect_reach "$NS_OPTOUT" "$NS_OPTOUT"
+  step "control: opted-out ns reachable" "control FAILED: opted-out ns not reachable" eventually "$PRE_TIMEOUT" 2 expect_reach "$NS_OPTOUT" "$NS_OPTOUT"
+  if [ "$ALLOW_MODE" = label ]; then
+    if apply_same_ns "$NS_A"; then
+      step "with $SAME_NS_CNP applied: same-namespace reachable after @T@s" "with $SAME_NS_CNP applied: same-namespace STILL blocked after ${ALLOW_T}s" eventually "$ALLOW_T" 2 expect_reach "$NS_A" "$NS_A"
+      step "cross-namespace still blocked with $SAME_NS_CNP" "cross-namespace reachable with $SAME_NS_CNP (the policy must not open other namespaces)" expect_blocked "$NS_A" "$NS_B"
+      delete_same_ns "$NS_A"
+      step "$SAME_NS_CNP removed: same-namespace blocked again after @T@s" "$SAME_NS_CNP removed: same-namespace NOT blocked again within ${ALLOW_T}s" eventually "$ALLOW_T" 2 expect_blocked "$NS_A" "$NS_A"
+    fi
+  fi
   finish same-ns
 }
 
@@ -1157,7 +1341,7 @@ same_ns_denied_unannotated() {
 ac1_optout_live_flip() {
   reset_state; begin
   step "unannotated same-namespace denied" "precondition: same-namespace traffic in unannotated $NS_A is not denied (is the clusterwide deny applied? does the selector match?)" \
-    eventually 30 2 expect_blocked "$NS_A" "$NS_A" || { finish ac1; return; }
+    eventually "$PRE_TIMEOUT" 2 expect_blocked "$NS_A" "$NS_A" || { finish ac1; return; }
   local uid0 rs0 uid1 rs1 ag node where irc
   uid0="$(K -n "$NS_A" get pod client -o jsonpath='{.metadata.uid}')"; rs0="$(K -n "$NS_A" get pod client -o jsonpath='{.status.containerStatuses[0].restartCount}')"
   set_optout "$NS_A" || { finish ac1; return; }
@@ -1222,8 +1406,11 @@ baseline_valid() { # -> 0 valid (BASE_RS set), 1 not
 }
 
 # Compare the Cilium cluster health of every agent with its pre-deny baseline (BASE_HEALTH lines "<agent> <reachable> <total>").
+# FAIL only when an agent with a baseline AND an unchanged node count (total == baseline total) has more unreachable nodes than
+# before. Everything that cannot be compared is INCONCLUSIVE, never a PASS and never a FAIL: an agent without a reading now,
+# an agent without a baseline, a baseline agent that is gone, or a changed node count (nodes added/removed since the baseline).
 ac2_cluster_health() {
-  local now pod ip h n m bn bm base_line report="" worse="" unread="" nobase="" short=0 nag=0 enf=""
+  local now pod ip h n m bn bm base_line report="" worse="" unread="" nobase="" changed="" nag=0 enf=""
   now="$(SPIKE_HEALTH_WAIT=0 capture_cluster_health)"   # no convergence wait: the number now is the number to judge
   while read -r pod n m; do
     [ -z "$pod" ] && continue
@@ -1231,18 +1418,27 @@ ac2_cluster_health() {
     base_line="$(printf '%s\n' "$BASE_HEALTH" | awk -v p="$pod" '$1==p{print $2, $3; exit}')"
     if [ -z "$base_line" ]; then
       report="${report}${pod} no-baseline->${n}/${m}; "; nobase="${nobase} ${pod}"
-      [ "$n" != "$m" ] && short=1
       continue
     fi
     bn="${base_line% *}"; bm="${base_line#* }"
     report="${report}${pod} ${bn}/${bm}->${n}/${m}; "
-    # unreachable count before vs after: robust against a node count that changed in between
-    if [ $((m - n)) -gt $((bm - bn)) ]; then worse="${worse} ${pod}(${bn}/${bm}->${n}/${m})"; fi
+    if [ "$m" != "$bm" ]; then
+      # the node count changed since the baseline: the two numbers are not comparable
+      changed="${changed} ${pod}(${bn}/${bm}->${n}/${m})"
+    elif [ $((m - n)) -gt $((bm - bn)) ]; then
+      worse="${worse} ${pod}(${bn}/${bm}->${n}/${m})"
+    fi
   done <<< "$now"
+  # agents that exist now but gave no reading
   while read -r pod ip; do
     [ -z "$pod" ] && continue
     printf '%s\n' "$now" | awk -v p="$pod" '$1==p{f=1} END{exit !f}' || unread="${unread} ${pod}"
   done < <(agent_pods)
+  # agents of the baseline that are not among the current readings (agent gone or not answering)
+  while read -r pod n m; do
+    [ -z "$pod" ] && continue
+    printf '%s\n' "$now" | awk -v p="$pod" '$1==p{f=1} END{exit !f}' || case " $unread " in *" $pod "*) ;; *) unread="${unread} ${pod}" ;; esac
+  done <<< "$BASE_HEALTH"
   # policy enforcement of the Cilium health endpoint (reserved:health) per agent: Disabled/Disabled = no policy selects it
   while read -r pod ip; do
     [ -z "$pod" ] && continue
@@ -1254,15 +1450,14 @@ ac2_cluster_health() {
     ev "cilium cluster health NOT read on any agent (no exec): health half NOT verified"; INCONC=1; return 0
   fi
   ev "cilium cluster health per agent, before the deny -> now (reachable/total): ${report%; }"
-  [ -n "$unread" ] && ev "agents that did not answer now:${unread}"
   ev "health endpoint (reserved:health) policy enforcement ingress/egress per agent: ${enf:-not read} (Disabled/Disabled = no policy selects it)"
   if [ -n "$worse" ]; then
     ev "cilium cluster health DEGRADED versus the pre-deny baseline on:${worse}"; OK=0
-  elif [ -n "$nobase" ] && [ "$short" = 1 ]; then
-    ev "no pre-deny baseline for:${nobase} and not every node is reachable: cannot tell whether the deny caused it"; INCONC=1
-  elif [ -n "$nobase" ]; then
-    ev "no pre-deny baseline for:${nobase}; all nodes reachable now"
-  else
+  fi
+  if [ -n "$unread" ]; then ev "no reading now for agent(s):${unread}: health not compared there"; INCONC=1; fi
+  if [ -n "$nobase" ]; then ev "no pre-deny baseline for:${nobase}: cannot tell whether the deny caused any unreachable nodes"; INCONC=1; fi
+  if [ -n "$changed" ]; then ev "node count changed since the baseline on:${changed}: health numbers not comparable"; INCONC=1; fi
+  if [ -z "$worse" ] && [ -z "$unread" ] && [ -z "$nobase" ] && [ -z "$changed" ]; then
     ev "cilium cluster health not worse than before the deny on any agent"
   fi
 }
@@ -1335,17 +1530,27 @@ ac3_aks_support() {
   result ac3 "$st" "${why}non-AKS provider ${PROVIDER}: selector support = ac1 outcome (${sel}); drop signals: ${signals}; bpf-policy-map-max: ${pm}. Re-run with --provider aks on the AKS test WC for the AKS-specific answer."
 }
 
-# ac4: per-endpoint BPF policy-map usage with deny + DNS allow + all six standard allows
+# ac4: per-endpoint BPF policy-map usage with deny + DNS allow + all standard allows
+# (label mode: the five allow labels + the Same-namespace policy on the namespace; kyverno mode: six generated CNPs)
 ac4_bpf_map_usage() {
   reset_state; begin; gen_seen_reset
-  [ "$HAVE_GPOL" = 1 ] || { result ac4 MANUAL "GeneratingPolicy CRD missing: cannot generate the six standard allows. Apply them by hand then run: cilium-dbg bpf policy get --all -n"; return; }
+  local nallows=6 what="6 standard allows"
+  have_allows || { result ac4 MANUAL "GeneratingPolicy CRD missing: cannot generate the six standard allows. Apply them by hand then run: cilium-dbg bpf policy get --all -n"; return; }
   K apply -f "$M/ccnp-allow-dns-all-namespaces.yaml" >/dev/null || { result ac4 ERROR "applying the clusterwide DNS allow failed"; return; }
   local a i lost
-  # one annotation per request, 2 s apart: the bulk (single-request) annotation has its own check
-  annotate_each "$NS_ALL" || { result ac4 ERROR "could not annotate $NS_ALL"; return; }
-  for a in $GEN_ANNOTATIONS; do
-    await_generated "$NS_ALL" "$a" || { result ac4 FAIL "standard allow $a was NEVER generated in $NS_ALL within ${SYNC_TIMEOUT}s"; return; }
-  done
+  if [ "$ALLOW_MODE" = label ]; then
+    nallows="$(n_allows)"
+    what="${nallows} allow labels + the Same-namespace policy"
+    # one label per request, 2 s apart: the one-request case has its own check (bulk)
+    label_allow_each "$NS_ALL" || { result ac4 ERROR "could not label $NS_ALL"; return; }
+    apply_same_ns "$NS_ALL" || { result ac4 ERROR "could not apply $SAME_NS_CNP in $NS_ALL"; return; }
+  else
+    # one annotation per request, 2 s apart: the bulk (single-request) annotation has its own check
+    annotate_each "$NS_ALL" || { result ac4 ERROR "could not annotate $NS_ALL"; return; }
+    for a in $GEN_ANNOTATIONS; do
+      await_generated "$NS_ALL" "$a" || { result ac4 FAIL "standard allow $a was NEVER generated in $NS_ALL within ${SYNC_TIMEOUT}s"; return; }
+    done
+  fi
   for i in $(seq 1 "$LOAD_PODS"); do
     cat <<EOF | K apply -f - >/dev/null
 apiVersion: v1
@@ -1373,7 +1578,9 @@ EOF
   done
   K -n "$NS_ALL" wait --for=condition=Ready pod --all --timeout=180s >/dev/null 2>&1 || note "not all load pods Ready; continuing"
   sleep 10
-  if lost="$(lost_allows "$NS_ALL")"; then
+  # label mode: the last label may need ~35 s to reach the identities (and so the policy maps): wait before measuring
+  [ "$ALLOW_MODE" = label ] && sleep "$LABEL_SETTLE"
+  if [ "$ALLOW_MODE" = kyverno ] && lost="$(lost_allows "$NS_ALL")"; then
     K -n "$NS_ALL" delete pods -l "load,${OWNER_SEL}" --wait=false >/dev/null 2>&1 || true
     delete_owned "$CCNP" "$DNS_ALLOW_NAME"
     result ac4 FINDING "generated-then-deleted: standard allows that were generated in $NS_ALL are gone again: ${lost} (not regenerated). The map measurement would not include them, so it was not taken: see the bulk check"
@@ -1390,12 +1597,13 @@ EOF
   best="$(awk '/^### agent/{ag=$3} /^Endpoint ID:/{id=$3} /^(Allow|Deny)[ \t]/{c[ag " endpoint " id]++} END{for(k in c) print c[k], k}' "$out" | sort -rn | head -n1)"
   maxn="${best%% *}"; maxwhere="${best#* }"
   pct=$((${maxn:-0} * 100 / limit))
-  ev "max entries on one endpoint: ${maxn:-0} (agent ${maxwhere}) of limit ${limit} = ${pct}%; ${LOAD_PODS} load pods (distinct identities) + 6 standard allows + DNS CCNP in ${NS_ALL}; raw dump ${out}"
+  ev "max entries on one endpoint: ${maxn:-0} (agent ${maxwhere}) of limit ${limit} = ${pct}%; ${LOAD_PODS} load pods (distinct identities) + ${what} + DNS CCNP in ${NS_ALL}; raw dump ${out}"
   if [ "$pct" -lt 50 ]; then ev "below the ~50% action threshold"; else ev "ABOVE the ~50% action threshold: act on policyMapMax / fewer-merged policies"; OK=0; fi
   finish ac4
   note "Scale realism: raise SPIKE_LOAD_PODS to the largest identity count per namespace of a real customer cluster and re-run ac4."
   K -n "$NS_ALL" delete pods -l "load,${OWNER_SEL}" --wait=false >/dev/null 2>&1 || true
   delete_owned "$CCNP" "$DNS_ALLOW_NAME"
+  if [ "$ALLOW_MODE" = label ]; then unlabel_allow_all "$NS_ALL"; delete_same_ns "$NS_ALL"; fi
 }
 
 # ac5: GeneratingPolicy: annotation -> CNP, hand edits reverted, annotation removal deletes the CNP
@@ -1532,24 +1740,8 @@ ac_flap() {
       -o jsonpath='{.type} {.object.metadata.name} {.object.metadata.uid} {.object.metadata.creationTimestamp}{"\n"}' 2>/dev/null \
       | while read -r l; do echo "$(date +%s) $l"; done >> "$f_watch" ) &
   wpid=$!; BG_PIDS+=("$wpid")
-  # Continuous same-namespace + DNS probe loop inside the client pod (a curl+dig pair per iteration, ~5-10 pairs/s).
-  # Same classification as probe_http: curl exit 0/35/52/56/60 = reachable, anything else is a failure; a dig answer
-  # needs an A record.
-  run_bounded $((FLAP_SECONDS + 80)) kubectl "${KARGS[@]+"${KARGS[@]}"}" -n "$NS_A" exec client -- sh -c \
-    'end=$(( $(date +%s) + $1 )); n=0
-     while [ "$(date +%s)" -lt "$end" ]; do
-       n=$((n+1)); t=$(date +%s)
-       curl -s -k -m 1 -o /dev/null "$2"; rc=$?
-       case "$rc" in 0|35|52|56|60) ;; 28) echo "FAIL http timeout $t" ;; *) echo "FAIL http rc$rc $t" ;; esac
-       o=$(dig +time=1 +tries=1 "$3" 2>&1)
-       if echo "$o" | grep -Eq "IN[[:space:]]+A[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"; then :
-       elif echo "$o" | grep -q "no servers could be reached"; then echo "FAIL dns timeout $t"
-       else echo "FAIL dns other $t"; fi
-       sleep 0.1
-     done
-     echo "TOTAL $n"' \
-    sh "$((FLAP_SECONDS + 30))" "$url" "kubernetes.default.svc.${CLUSTER_DOMAIN}" > "$f_probe" 2>&1 &
-  ppid_=$!; BG_PIDS+=("$ppid_")
+  flap_probe_start "$NS_A" "$url" "$f_probe"
+  ppid_="$FLAP_PPID"
   sleep 3
   echo "$(date +%s) MARK updates-start" >> "$f_watch"
   end=$((SECONDS + FLAP_SECONDS - 4)); i=0
@@ -1643,7 +1835,7 @@ timeline_verdict() { # series nexp
 ac_bulk() {
   reset_state; begin
   [ "$HAVE_GPOL" = 1 ] || { result bulk MANUAL "GeneratingPolicy CRD missing on this cluster"; return; }
-  local f="$OUTDIR/bulk-evidence.txt" t0b t0s T cb cs sb="" ss="" nb ns_ nexp ur0 ur1 wins hits vb vs wb ws status last
+  local f="$OUTDIR/bulk-evidence.txt" t0b t0s T el cb cs sb="" ss="" nb ns_ nexp ur0 ur1 wins hits vb vs wb ws status last
   mkdir -p "$OUTDIR"; : > "$f"
   set -- $GEN_ANNOTATIONS; nexp=$#
   bulk_ns_fresh "$NS_BULK" || { finish bulk; return; }
@@ -1656,10 +1848,13 @@ ac_bulk() {
   t0s=$((SECONDS - ${SPIKE_ANNOTATE_GAP:-2}))
   for T in $BULK_SAMPLES; do
     while [ "$SECONDS" -lt $((t0b + T)) ]; do sleep 1; done
+    # the sample is labelled with the REAL seconds since the bulk annotation: when the annotate loop ran past the planned time
+    # (6 one-by-one annotations take >10 s) the sample is taken late, and "5" would be wrong
+    el=$((SECONDS - t0b))
     cb="$(count_allows "$NS_BULK")"; cs="$(count_allows "$NS_SEQ")"
     nb="$(names_allows "$NS_BULK")"; ns_="$(names_allows "$NS_SEQ")"
-    sb="$sb ${T}:${cb:-0}"; ss="$ss ${T}:${cs:-0}"; last="$T"
-    echo "t=${T}s (control age $((SECONDS - t0s))s) bulk=${cb:-0}/${nexp} [${nb}] control=${cs:-0}/${nexp} [${ns_}] urs=$(ur_count)" >> "$f"
+    sb="$sb ${el}:${cb:-0}"; ss="$ss ${el}:${cs:-0}"; last="$el"
+    echo "t=${el}s (control age $((SECONDS - t0s))s) bulk=${cb:-0}/${nexp} [${nb}] control=${cs:-0}/${nexp} [${ns_}] urs=$(ur_count)" >> "$f"
   done
   ur1="$(ur_count)"; ur_dump "$f" "after the last sample"
   wins=$((SECONDS - t0b + 60))
@@ -1714,24 +1909,348 @@ ac_restart() {
   finish restart
 }
 
+# Continuous same-namespace + DNS probe loop inside the client pod of namespace $1 (a curl+dig pair per iteration, ~5-10
+# pairs/s), output in file $3, started in the background (pid in FLAP_PPID, also added to BG_PIDS). Same classification as
+# probe_http: curl exit 0/35/52/56/60 = reachable, anything else is a failure; a dig answer needs an A record.
+FLAP_PPID=""
+flap_probe_start() { # ns url outfile
+  run_bounded $((FLAP_SECONDS + 80)) kubectl "${KARGS[@]+"${KARGS[@]}"}" -n "$1" exec client -- sh -c \
+    'end=$(( $(date +%s) + $1 )); n=0
+     while [ "$(date +%s)" -lt "$end" ]; do
+       n=$((n+1)); t=$(date +%s)
+       curl -s -k -m 1 -o /dev/null "$2"; rc=$?
+       case "$rc" in 0|35|52|56|60) ;; 28) echo "FAIL http timeout $t" ;; *) echo "FAIL http rc$rc $t" ;; esac
+       o=$(dig +time=1 +tries=1 "$3" 2>&1)
+       if echo "$o" | grep -Eq "IN[[:space:]]+A[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"; then :
+       elif echo "$o" | grep -q "no servers could be reached"; then echo "FAIL dns timeout $t"
+       else echo "FAIL dns other $t"; fi
+       sleep 0.1
+     done
+     echo "TOTAL $n"' \
+    sh "$((FLAP_SECONDS + 30))" "$2" "kubernetes.default.svc.${CLUSTER_DOMAIN}" > "$3" 2>&1 &
+  FLAP_PPID=$!; BG_PIDS+=("$FLAP_PPID")
+}
+
+# Probe client + server pods (netshoot) in an owner-labelled namespace, for the label-mode checks that create their own namespaces.
+apply_probe_pods() { # ns
+  P_DETAIL="applying the probe pods in $1 FAILED"
+  cat <<EOF | K apply -f - >/dev/null || return 1
+apiVersion: v1
+kind: Pod
+metadata:
+  name: client
+  namespace: $1
+  labels:
+    app: client
+    ${OWNER_KEY}: ${OWNER_VAL}
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: client
+      image: ${IMAGE}
+      command: ["sleep", "infinity"]
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        seccompProfile:
+          type: RuntimeDefault
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: server
+  namespace: $1
+  labels:
+    app: server
+    ${OWNER_KEY}: ${OWNER_VAL}
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: server
+      image: ${IMAGE}
+      command: ["socat", "TCP-LISTEN:8080,fork,reuseaddr", "SYSTEM:head -n 1 >/dev/null; echo HTTP/1.0 200 OK; echo; echo ok"]
+      ports:
+        - containerPort: 8080
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        seccompProfile:
+          type: RuntimeDefault
+EOF
+  K -n "$1" wait --for=condition=Ready pod/client pod/server --timeout=180s >/dev/null 2>&1 || { P_DETAIL="probe pods in $1 not Ready (image pull? set SPIKE_IMAGE)"; return 1; }
+}
+
+# The ClusterIP URL of the API server (no DNS involved): API_URL; return 2 + P_DETAIL when it cannot be read.
+API_URL=""
+apiserver_url() {
+  local ip port
+  ip="$(K -n default get svc kubernetes -o jsonpath='{.spec.clusterIP}' 2>/dev/null)"
+  port="$(K -n default get svc kubernetes -o jsonpath='{.spec.ports[0].port}' 2>/dev/null)"
+  [ -n "$ip" ] || { P_DETAIL="cannot read the ClusterIP of default/kubernetes"; return 2; }
+  API_URL="https://${ip}:${port:-443}/version"
+}
+
+# ---------------------------------------------------------------------------------------------- label mode checks
+# ac5 (label mode): allow label on/off latency over SPIKE_LABEL_ROUNDS rounds; removal must block again EVERY time. The allow under
+# test is allow-kube-apiserver, probed by ClusterIP. Latencies include ~3-4 s of probe overhead (a curl timeout is 3 s).
+ac5_label_onoff() {
+  reset_state; begin
+  local r rc t0 ons="" offs="" maxon=0 maxoff=0 t blocked_rounds=0 nrounds=0 stop=0
+  apiserver_url || { result ac5 INCONCLUSIVE "$P_DETAIL"; return; }
+  step "API server blocked before the first label" "precondition: the API server is reachable from $NS_A without the allow label (is the clusterwide deny applied?)" \
+    eventually "$PRE_TIMEOUT" 2 expect_blocked "$NS_A" "$API_URL" || { finish ac5; return; }
+  for r in $(seq 1 "$LABEL_ROUNDS"); do
+    nrounds=$r
+    label_allow "$NS_A" kube-apiserver || { finish ac5; return; }
+    t0=$SECONDS
+    eventually "$LABEL_TIMEOUT" 1 expect_reach "$NS_A" "$API_URL"; rc=$?
+    t=$((SECONDS - t0))
+    case "$rc" in
+      0) ons="$ons ${t}s"; [ "$t" -gt "$maxon" ] && maxon="$t" ;;
+      1) ev "round $r: label set, API server still NOT reachable after ${LABEL_TIMEOUT}s"; OK=0; stop=1 ;;
+      *) ev "round $r: label set, probe inconclusive (${P_DETAIL})"; INCONC=1; stop=1 ;;
+    esac
+    # always remove the label again, also after a failed round
+    unlabel_allow "$NS_A" kube-apiserver || { finish ac5; return; }
+    [ "$stop" = 1 ] && break
+    t0=$SECONDS
+    eventually "$LABEL_TIMEOUT" 1 expect_blocked "$NS_A" "$API_URL"; rc=$?
+    t=$((SECONDS - t0))
+    case "$rc" in
+      0) offs="$offs ${t}s"; [ "$t" -gt "$maxoff" ] && maxoff="$t"; blocked_rounds=$((blocked_rounds + 1)) ;;
+      1) ev "round $r: label REMOVED but the API server is still reachable after ${LABEL_TIMEOUT}s: removal did NOT block"; OK=0; stop=1 ;;
+      *) ev "round $r: label removed, probe inconclusive (${P_DETAIL})"; INCONC=1; stop=1 ;;
+    esac
+    [ "$stop" = 1 ] && break
+  done
+  ev "label on -> reachable after:${ons:- none}${ons:+ (max ${maxon}s)}; label off -> blocked after:${offs:- none}${offs:+ (max ${maxoff}s)}; removal blocked in ${blocked_rounds}/${nrounds} rounds (seconds include ~3-4 s probe overhead; waits up to ${LABEL_TIMEOUT}s)"
+  finish ac5
+}
+
+# flap (label mode): label mode has no generated objects, so unrelated Namespace updates must not delete or recreate anything:
+# FAIL when a label CCNP or the Same-namespace policy is deleted or its uid changes. The probe loop (same-namespace + DNS) reports
+# probe failures during the updates: unrelated LABEL changes recompute the namespace's identities, so failures there are a FINDING.
+ac_flap_label() {
+  reset_state; begin
+  local f_watch="$OUTDIR/flap-watch.txt" f_probe="$OUTDIR/flap-probe.txt" u0="$OUTDIR/flap-uids-before.txt" u1="$OUTDIR/flap-uids-after.txt"
+  local srv url end i wpid wpid2 ppid_ nd total failhttp faildns changed uperr=0
+  mkdir -p "$OUTDIR"; : > "$f_watch"; : > "$f_probe"
+  flap_uids() { { K get "$CCNP" -l "$OWNER_SEL" -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.uid} {.metadata.creationTimestamp}{"\n"}{end}' 2>/dev/null; cnp_uids "$NS_A"; } | sort; }
+  label_allow_each "$NS_A" || { finish flap; return; }
+  apply_same_ns "$NS_A" || { finish flap; return; }
+  step "" "same-namespace not reachable with all allow labels + $SAME_NS_CNP within ${LABEL_TIMEOUT}s" eventually "$LABEL_TIMEOUT" 2 expect_reach "$NS_A" "$NS_A" || { finish flap; return; }
+  step "" "DNS not working with allow-dns labeled within ${LABEL_TIMEOUT}s" eventually "$LABEL_TIMEOUT" 2 expect_dns_works "$NS_A" || { finish flap; return; }
+  srv="$(pod_ip "$NS_A" server)"; url="http://${srv}:8080/"
+  flap_uids > "$u0"
+  # watch the label CCNPs and the Same-namespace policy with DELETED events, timestamped per second; bounded, killed at the end
+  ( run_bounded $((FLAP_SECONDS + 90)) kubectl "${KARGS[@]+"${KARGS[@]}"}" get "$CCNP" -l "$OWNER_SEL" -w --output-watch-events \
+      -o jsonpath='{.type} {.object.metadata.name} {.object.metadata.uid} {.object.metadata.creationTimestamp}{"\n"}' 2>/dev/null \
+      | while read -r l; do echo "$(date +%s) $l"; done >> "$f_watch" ) &
+  wpid=$!; BG_PIDS+=("$wpid")
+  ( run_bounded $((FLAP_SECONDS + 90)) kubectl "${KARGS[@]+"${KARGS[@]}"}" -n "$NS_A" get "$CNP" -w --output-watch-events \
+      -o jsonpath='{.type} {.object.metadata.name} {.object.metadata.uid} {.object.metadata.creationTimestamp}{"\n"}' 2>/dev/null \
+      | while read -r l; do echo "$(date +%s) $l"; done >> "$f_watch" ) &
+  wpid2=$!; BG_PIDS+=("$wpid2")
+  flap_probe_start "$NS_A" "$url" "$f_probe"
+  ppid_="$FLAP_PPID"
+  sleep 3
+  echo "$(date +%s) MARK updates-start" >> "$f_watch"
+  end=$((SECONDS + FLAP_SECONDS - 4)); i=0
+  note "making unrelated Namespace updates (dummy label + annotation add/remove) on $NS_A for ~${FLAP_SECONDS}s"
+  while [ "$SECONDS" -lt "$end" ]; do
+    i=$((i + 1))
+    K label namespace "$NS_A" "${KIT}-flap=$i" --overwrite >/dev/null 2>&1 || uperr=1; sleep 2
+    K label namespace "$NS_A" "${KIT}-flap-" >/dev/null 2>&1 || uperr=1; sleep 2
+    K annotate namespace "$NS_A" "${KIT}.giantswarm.io/flap=$i" --overwrite >/dev/null 2>&1 || uperr=1; sleep 2
+    K annotate namespace "$NS_A" "${KIT}.giantswarm.io/flap-" >/dev/null 2>&1 || uperr=1; sleep 2
+  done
+  [ "$uperr" = 1 ] && fail_op "some of the unrelated Namespace updates FAILED (kubectl label/annotate returned an error)"
+  wait "$ppid_" 2>/dev/null
+  kill_tree "$wpid"; kill_tree "$wpid2"
+  flap_uids > "$u1"
+  nd="$(awk '$2=="MARK"{m=1;next} m&&$2=="DELETED"{n++} END{print n+0}' "$f_watch")"
+  total="$(awk '$1=="TOTAL"{print $2}' "$f_probe")"
+  failhttp="$(grep -c '^FAIL http' "$f_probe")"; faildns="$(grep -c '^FAIL dns' "$f_probe")"
+  changed="$(diff "$u0" "$u1" | grep -c '^>')"
+  ev "${i} rounds of unrelated Namespace updates; DELETED events for label CCNPs / $SAME_NS_CNP during the updates: ${nd}; objects whose uid/creationTimestamp changed: ${changed}"
+  ev "probe loop: ${total:-?} iterations, failed http: ${failhttp}, failed dns: ${faildns} (raw: $f_probe, $f_watch)"
+  if [ "$ERR" = 1 ]; then
+    result flap ERROR "$EV"
+  elif [ -z "$total" ]; then
+    ev "probe loop did not finish: $(head -c 200 "$f_probe" | tr '\n' ' ')"
+    result flap INCONCLUSIVE "$EV"
+  elif [ "$nd" != 0 ] || [ "$changed" != 0 ]; then
+    result flap FAIL "$EV: label mode must not delete or recreate anything on unrelated Namespace updates"
+  elif [ "$failhttp" != 0 ] || [ "$faildns" != 0 ]; then
+    result flap FINDING "$EV: nothing was deleted or recreated, but the probe saw failures during unrelated Namespace updates (label changes recompute the namespace's identities): size them against the SLO of labeled namespaces; raw: $f_probe"
+  else
+    result flap PASS "$EV: nothing deleted or recreated, no probe failure"
+  fi
+  unlabel_allow_all "$NS_A"; delete_same_ns "$NS_A"
+}
+
+# bulk (label mode): all five allow labels in ONE request vs one by one (control), in fresh namespaces. Persistence is judged at
+# every sample (seconds after the request, real elapsed time): all five labels still on the namespace AND the two allows that can
+# be probed from a pod keep working (allow-kube-apiserver by ClusterIP, allow-dns). The ingress allows need a real source
+# (see "Known limits"), so they are checked by label presence only. Expected PASS; anything else is a FAIL.
+bulk_label_sample() { # ns -> BL_LABELS, BL_API, BL_DNS (ok | BLOCKED | inconclusive)
+  BL_LABELS="$(count_allow_labels "$1")"
+  expect_reach "$1" "$API_URL"; case $? in 0) BL_API=ok ;; 1) BL_API=BLOCKED ;; *) BL_API=inconclusive ;; esac
+  expect_dns_works "$1"; case $? in 0) BL_DNS=ok ;; 1) BL_DNS=BLOCKED ;; *) BL_DNS=inconclusive ;; esac
+}
+ac_bulk_label() {
+  reset_state; begin
+  local f="$OUTDIR/bulk-evidence.txt" t0b t0s T nexp ns el sb="" ss="" bbad=0 binc=0 sbad=0 sinc=0 rc tb ts
+  mkdir -p "$OUTDIR"; : > "$f"
+  nexp="$(n_allows)"
+  apiserver_url || { result bulk INCONCLUSIVE "$P_DETAIL"; return; }
+  for ns in "$NS_BULK" "$NS_SEQ"; do
+    bulk_ns_fresh "$ns" || { finish bulk; return; }
+    apply_probe_pods "$ns" || { fail_op "${P_DETAIL:-creating the probe pods in $ns FAILED}"; finish bulk; return; }
+    step "" "precondition: the API server is reachable from $ns without any allow label" eventually "$PRE_TIMEOUT" 2 expect_blocked "$ns" "$API_URL" || { finish bulk; return; }
+  done
+  label_allow_bulk "$NS_BULK" || { finish bulk; return; }
+  t0b=$SECONDS
+  note "bulk: all ${nexp} allow labels of $NS_BULK in one request; control: $NS_SEQ one at a time, ${SPIKE_ANNOTATE_GAP:-2}s apart; samples at ${BULK_SAMPLES// /s, }s after the bulk request"
+  label_allow_each "$NS_SEQ" || { finish bulk; return; }
+  t0s=$((SECONDS - ${SPIKE_ANNOTATE_GAP:-2}))
+  # time until the labels act (API server reachable), counted from the bulk request / from the last control label
+  eventually "$LABEL_TIMEOUT" 1 expect_reach "$NS_BULK" "$API_URL"; rc=$?
+  tb=$((SECONDS - t0b))
+  if [ "$rc" -eq 0 ]; then ev "bulk (one request): API server reachable ${tb}s after the request"; else ev "bulk (one request): API server NOT reachable ${LABEL_TIMEOUT}s after the request"; OK=0; fi
+  eventually "$LABEL_TIMEOUT" 1 expect_reach "$NS_SEQ" "$API_URL"; rc=$?
+  ts=$((SECONDS - t0s))
+  if [ "$rc" -eq 0 ]; then ev "control (one by one): API server reachable ${ts}s after the last label"; else ev "control (one by one): API server NOT reachable ${LABEL_TIMEOUT}s after the last label"; OK=0; fi
+  for T in $BULK_SAMPLES; do
+    while [ "$SECONDS" -lt $((t0b + T)) ]; do sleep 1; done
+    el=$((SECONDS - t0b))   # real elapsed time since the bulk request, not the planned sample time
+    bulk_label_sample "$NS_BULK"
+    sb="$sb ${el}s:${BL_LABELS}/${nexp}+api=${BL_API}+dns=${BL_DNS}"
+    if [ "$BL_LABELS" != "$nexp" ] || [ "$BL_API" = BLOCKED ] || [ "$BL_DNS" = BLOCKED ]; then bbad=$((bbad + 1)); fi
+    if [ "$BL_API" = inconclusive ] || [ "$BL_DNS" = inconclusive ]; then binc=$((binc + 1)); fi
+    echo "t=${el}s bulk labels=${BL_LABELS}/${nexp} api=${BL_API} dns=${BL_DNS}" >> "$f"
+    bulk_label_sample "$NS_SEQ"
+    ss="$ss ${el}s:${BL_LABELS}/${nexp}+api=${BL_API}+dns=${BL_DNS}"
+    if [ "$BL_LABELS" != "$nexp" ] || [ "$BL_API" = BLOCKED ] || [ "$BL_DNS" = BLOCKED ]; then sbad=$((sbad + 1)); fi
+    if [ "$BL_API" = inconclusive ] || [ "$BL_DNS" = inconclusive ]; then sinc=$((sinc + 1)); fi
+    echo "t=${el}s (control age $((SECONDS - t0s))s) control labels=${BL_LABELS}/${nexp} api=${BL_API} dns=${BL_DNS}" >> "$f"
+  done
+  ev "samples (seconds since the bulk request: labels present + API + DNS), bulk:${sb}; control:${ss} (details: $f)"
+  delete_owned namespaces "$NS_BULK" || fail_op "deleting namespace $NS_BULK FAILED"
+  delete_owned namespaces "$NS_SEQ" || fail_op "deleting namespace $NS_SEQ FAILED"
+  if [ "$bbad" -gt 0 ]; then ev "bulk labels did NOT persist/act at ${bbad} sample(s)"; OK=0; fi
+  if [ "$sbad" -gt 0 ]; then ev "one-by-one control did NOT persist/act at ${sbad} sample(s)"; OK=0; fi
+  if [ "$binc" -gt 0 ] || [ "$sinc" -gt 0 ]; then ev "some probes were inconclusive (bulk ${binc}, control ${sinc})"; INCONC=1; fi
+  if [ "$OK" = 1 ] && [ "$ERR" = 0 ]; then ev "all ${nexp} labels persisted and acted through the last sample, in both namespaces"; fi
+  finish bulk
+}
+
+# nodeny (label mode): the standard allows and the Same-namespace policy carry enableDefaultDeny false/false, so WITHOUT the
+# clusterwide deny they must not restrict a namespace. The kit deny CCNP is deleted for the duration (owner-checked; the exit trap
+# and restore_deny put it back, success or failure), all five allow labels and the Same-namespace policy are set in a fresh owned
+# namespace, and cross-namespace (both directions) and external traffic must stay reachable for the whole settle window.
+endpoint_enforcement() { # ns agent -> "<ingress>/<egress>(allow-dns label in identity: yes|NO)" per endpoint of the namespace
+  agent_exec "$2" endpoint list | awk -v ns="$1" -v lab="io.cilium.k8s.namespace.labels.$(label_key dns)=true" '
+    function flush() { if (hit) printf "%s(allow-dns label in identity: %s) ", enf, (hl ? "yes" : "NO"); hit = 0; hl = 0 }
+    $1 ~ /^[0-9]+$/ && NF >= 3 { flush(); enf = $2 "/" $3 }
+    $0 ~ ("io.kubernetes.pod.namespace=" ns "([[:space:]]|$)") { hit = 1 }
+    index($0, lab) { hl = 1 }
+    END { flush() }'
+}
+nodeny_body() {
+  local t0 n=0 ext_ok=0 ag node enf i
+  bulk_ns_fresh "$NS_NODENY" || return 1
+  apply_probe_pods "$NS_NODENY" || { fail_op "${P_DETAIL:-creating the probe pods in $NS_NODENY FAILED}"; return 1; }
+  step "no deny: cross-namespace reachable ($NS_NODENY -> $NS_B) after @T@s" "precondition: $NS_NODENY -> $NS_B NOT reachable although the kit deny is deleted (another policy denies it)" \
+    eventually "$PRE_TIMEOUT" 2 expect_reach "$NS_NODENY" "$NS_B" || return 0
+  if expect_reach "$NS_NODENY" "$EXTERNAL_URL"; then ext_ok=1; ev "no deny: external ${EXTERNAL_URL} reachable"; else ev "external ${EXTERNAL_URL} not reachable even without the deny: external not asserted"; fi
+  label_allow_bulk "$NS_NODENY" || return 1
+  apply_same_ns "$NS_NODENY" || return 1
+  ev "set all $(n_allows) allow labels (one request) + $SAME_NS_CNP in $NS_NODENY"
+  t0=$SECONDS
+  # probe the whole settle window every ~5 s: a restriction that appears when the labels take effect (up to ~35 s) is caught
+  while :; do
+    i=$((SECONDS - t0)); n=$((n + 1))
+    step "" "t=${i}s: $NS_NODENY -> $NS_B (egress, cross-namespace) RESTRICTED" expect_reach "$NS_NODENY" "$NS_B"
+    step "" "t=${i}s: $NS_B -> $NS_NODENY (ingress, cross-namespace) RESTRICTED" expect_reach "$NS_B" "$NS_NODENY"
+    step "" "t=${i}s: $NS_NODENY -> $NS_NODENY (same-namespace) not reachable" expect_reach "$NS_NODENY" "$NS_NODENY"
+    [ "$ext_ok" = 1 ] && step "" "t=${i}s: $NS_NODENY -> ${EXTERNAL_URL} (external) RESTRICTED" expect_reach "$NS_NODENY" "$EXTERNAL_URL"
+    [ "$OK" = 0 ] && break
+    [ $((SECONDS - t0)) -ge "$LABEL_SETTLE" ] && break
+    sleep 5
+  done
+  if [ "$OK" = 1 ] && [ "$INCONC" = 0 ]; then
+    ev "not restricted in ${n} probe rounds over $((SECONDS - t0))s after the labels + $SAME_NS_CNP were set (cross-namespace both ways, same-namespace$([ "$ext_ok" = 1 ] && echo ', external'))"
+  fi
+  # informational: Cilium's own view of the namespace's endpoints (the identity must carry the allow label, i.e. the CCNP selects it)
+  node="$(K -n "$NS_NODENY" get pod client -o jsonpath='{.spec.nodeName}' 2>/dev/null)"
+  ag=""; [ -n "$node" ] && ag="$(agent_on_node "$node")"
+  if [ -n "$ag" ]; then
+    enf="$(endpoint_enforcement "$NS_NODENY" "$ag")"
+    ev "informational, agent $ag: endpoint policy enforcement ingress/egress of $NS_NODENY endpoints: ${enf:-not read} (Disabled/Disabled = enableDefaultDeny false did not switch them into default deny)"
+  else
+    ev "informational: no cilium agent exec, endpoint enforcement not read"
+  fi
+  return 0
+}
+ac_nodeny() {
+  reset_state; begin
+  local rc deny_was=0 gone_rc
+  kexists "$CCNP" "$DENY_NAME"; rc=$?
+  case "$rc" in
+    2) fail_op "cannot check for the kit deny: ${P_DETAIL}"; finish nodeny; return ;;
+    1) ev "the kit deny $DENY_NAME is not applied: nothing to delete or restore" ;;
+    0)
+      owner_label "$CCNP" "$DENY_NAME"; rc=$?
+      if [ "$rc" -ne 0 ] || [ "$OWNER_OUT" != "$OWNER_VAL" ]; then
+        fail_op "REFUSING to delete $DENY_NAME: it does not carry ${OWNER_SEL} (or cannot be read)"; finish nodeny; return
+      fi
+      deny_was=1
+      NODENY_ACTIVE=1   # from here on the exit trap re-applies the deny, also when this function is interrupted
+      delete_owned "$CCNP" "$DENY_NAME" || fail_op "deleting $DENY_NAME FAILED"
+      eventually 60 2 ccnp_gone "$DENY_NAME"; gone_rc=$?
+      if [ "$gone_rc" -ne 0 ]; then fail_op "$DENY_NAME still present 60s after the delete"; fi
+      ;;
+  esac
+  [ "$ERR" = 0 ] && nodeny_body
+  # the check's own namespace (labels, Same-namespace policy and pods go with it), then the deny comes back whatever happened above
+  delete_owned namespaces "$NS_NODENY" || fail_op "deleting namespace $NS_NODENY FAILED"
+  if [ "$deny_was" = 1 ]; then
+    if restore_deny; then
+      step "deny re-applied: same-namespace blocked again after @T@s" "deny re-applied but same-namespace NOT blocked again within ${PRE_TIMEOUT}s" eventually "$PRE_TIMEOUT" 2 expect_blocked "$NS_A" "$NS_A"
+    else
+      fail_op "the clusterwide deny could NOT be re-applied (see the message above); the exit trap retries"
+    fi
+  fi
+  finish nodeny
+}
+
 # apiserver: allow-kube-apiserver end to end (by ClusterIP, so DNS plays no part)
 ac_apiserver() {
   reset_state; begin
-  [ "$HAVE_GPOL" = 1 ] || { result apiserver MANUAL "GeneratingPolicy CRD missing on this cluster"; return; }
+  have_allows || { result apiserver MANUAL "GeneratingPolicy CRD missing on this cluster"; return; }
   local a=allow-kube-apiserver n ip port url
   n="$(gname "$a")"
   ip="$(K -n default get svc kubernetes -o jsonpath='{.spec.clusterIP}' 2>/dev/null)"
   port="$(K -n default get svc kubernetes -o jsonpath='{.spec.ports[0].port}' 2>/dev/null)"
   [ -n "$ip" ] || { result apiserver INCONCLUSIVE "cannot read the ClusterIP of default/kubernetes"; return; }
   url="https://${ip}:${port:-443}/version"
-  step "without the annotation the API server is blocked" "without the annotation the API server is reachable" eventually 30 2 expect_blocked "$NS_A" "$url" || { finish apiserver; return; }
-  annotate "$NS_A" "$a" || { finish apiserver; return; }
-  step "" "CNP $n not generated within ${SYNC_TIMEOUT}s" eventually "$SYNC_TIMEOUT" 2 cnp_exists "$NS_A" "$n"
-  step "with allow-kube-apiserver: TLS/HTTP answer from ${url} (http=@P@)" "with allow-kube-apiserver the API server is still unreachable (selector/entity wrong for this provider?)" eventually "$SYNC_TIMEOUT" 2 expect_reach "$NS_A" "$url"
+  step "without the ${ALLOW_WORD} the API server is blocked" "without the ${ALLOW_WORD} the API server is reachable" eventually "$PRE_TIMEOUT" 2 expect_blocked "$NS_A" "$url" || { finish apiserver; return; }
+  allow_on "$NS_A" kube-apiserver || { finish apiserver; return; }
+  if [ "$ALLOW_MODE" = kyverno ]; then
+    step "" "CNP $n not generated within ${SYNC_TIMEOUT}s" eventually "$SYNC_TIMEOUT" 2 cnp_exists "$NS_A" "$n"
+  fi
+  step "with allow-kube-apiserver: TLS/HTTP answer from ${url} (http=@P@) after @T@s" "with allow-kube-apiserver the API server is still unreachable after ${ALLOW_T}s (selector/entity wrong for this provider?)" eventually "$ALLOW_T" 2 expect_reach "$NS_A" "$url"
   EV="${EV//@P@/$P_CODE}"
-  unannotate "$NS_A" "$a"
-  eventually "$SYNC_TIMEOUT" 2 cnp_gone "$NS_A" "$n" || true
-  step "annotation removed: blocked again" "annotation removed: API server still reachable" eventually "$SYNC_TIMEOUT" 2 expect_blocked "$NS_A" "$url"
+  allow_off "$NS_A" kube-apiserver
+  if [ "$ALLOW_MODE" = kyverno ]; then eventually "$SYNC_TIMEOUT" 2 cnp_gone "$NS_A" "$n" || true; fi
+  step "${ALLOW_WORD} removed: blocked again after @T@s" "${ALLOW_WORD} removed: API server still reachable after ${ALLOW_T}s" eventually "$ALLOW_T" 2 expect_blocked "$NS_A" "$url"
   finish apiserver
 }
 
@@ -1763,7 +2282,14 @@ ac6_webhook_ingress() {
   done
   delete_owned "$CNP" "$WEBHOOK_CNP" "$NS_WEBHOOK"
   ev "per-variant connection delta:${tried}"
-  if [ "$HAVE_GPOL" = 1 ]; then
+  if [ "$ALLOW_MODE" = label ]; then
+    # the label CCNP needs up to ~35 s to act: poll the connection delta until the API server gets through
+    label_delta_positive() { gen="$(delta)"; [ "$gen" -gt 0 ]; }
+    allow_on "$NS_WEBHOOK" webhook-ingress
+    step "label CCNP $(label_cnp_name webhook-ingress) (ports 443/4443/8443/9443/10250): the API server reached the listener after @T@s" "label CCNP $(label_cnp_name webhook-ingress): the API server did NOT reach the listener within ${ALLOW_T}s" eventually "$ALLOW_T" 2 label_delta_positive
+    ev "label CCNP connection delta on the last poll: ${gen:-?}"
+    allow_off "$NS_WEBHOOK" webhook-ingress
+  elif [ "$HAVE_GPOL" = 1 ]; then
     annotate "$NS_WEBHOOK" allow-webhook-ingress
     if eventually "$SYNC_TIMEOUT" 2 cnp_exists "$NS_WEBHOOK" "$(gname allow-webhook-ingress)"; then
       sleep "$SETTLE"; gen="$(delta)"
@@ -1783,7 +2309,7 @@ ac6_webhook_ingress() {
     ev "provider ${PROVIDER}: narrowest working source = ${winner}"
   fi
   finish ac6
-  note "The generated allow-webhook-ingress uses [kube-apiserver, remote-node] on ports 443,4443,8443,9443,10250. Update the GeneratingPolicy to the winning source before shipping."
+  note "The standard allow-webhook-ingress (label CCNP or generated CNP) uses [kube-apiserver, remote-node] on ports 443,4443,8443,9443,10250. Update it to the winning source before shipping."
 }
 
 # dns: clusterwide DNS allow off vs allow-dns annotation vs clusterwide DNS allow on, plus kube-system / giantswarm
@@ -1834,15 +2360,15 @@ ac_dns() {
     done
     return $r
   }
-  step "off + unannotated: DNS blocked in $NS_A" "off + unannotated: DNS WORKS or is not cleanly blocked in $NS_A" eventually 30 2 expect_dns_blocked "$NS_A"
+  step "off + no allow-dns ${ALLOW_WORD}: DNS blocked in $NS_A" "off + no allow-dns ${ALLOW_WORD}: DNS WORKS or is not cleanly blocked in $NS_A" eventually "$PRE_TIMEOUT" 2 expect_dns_blocked "$NS_A"
   sys_dns "clusterwide allow off"
-  if [ "$HAVE_GPOL" = 1 ]; then
-    annotate "$NS_A" allow-dns
-    step "allow-dns annotation: DNS works" "allow-dns annotation: DNS still fails" eventually "$SYNC_TIMEOUT" 3 expect_dns_works "$NS_A"
-    unannotate "$NS_A" allow-dns
-    step "annotation removed: DNS blocked again" "annotation removed: DNS still works" eventually "$SYNC_TIMEOUT" 3 expect_dns_blocked "$NS_A"
+  if have_allows; then
+    allow_on "$NS_A" dns
+    step "allow-dns ${ALLOW_WORD}: DNS works after @T@s" "allow-dns ${ALLOW_WORD}: DNS still fails after ${ALLOW_T}s" eventually "$ALLOW_T" 3 expect_dns_works "$NS_A"
+    allow_off "$NS_A" dns
+    step "${ALLOW_WORD} removed: DNS blocked again after @T@s" "${ALLOW_WORD} removed: DNS still works after ${ALLOW_T}s" eventually "$ALLOW_T" 3 expect_dns_blocked "$NS_A"
   else
-    ev "allow-dns annotation case skipped (no GeneratingPolicy CRD)"
+    ev "allow-dns ${ALLOW_WORD} case skipped (no GeneratingPolicy CRD)"
   fi
   K apply -f "$M/ccnp-allow-dns-all-namespaces.yaml" >/dev/null || fail_op "applying the clusterwide DNS allow failed"
   step "clusterwide allow on: DNS works in unannotated $NS_B" "clusterwide allow on: DNS still fails in $NS_B" eventually 60 3 expect_dns_works "$NS_B"
@@ -1857,7 +2383,7 @@ ac_dns() {
 # ac7: L4-only DNS allow vs a customer L7 DNS rule (FQDN policy)
 ac7_l7_dns_interaction() {
   reset_state; begin
-  local allowed="${SPIKE_FQDN_ALLOWED:-example.com}" other="${SPIKE_FQDN_OTHER:-giantswarm.io}" a1 o1 a2 o2 widened=0
+  local allowed="${SPIKE_FQDN_ALLOWED:-example.com}" other="${SPIKE_FQDN_OTHER:-giantswarm.io}" a1 o1 a2 o2 widened=0 t_w
   cat <<EOF | K apply -f - >/dev/null
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -1900,24 +2426,35 @@ EOF
     result ac7 INCONCLUSIVE "$EV; the L7 rule is not effective on its own (${other} resolves), so widening cannot be judged"
     delete_owned "$CNP" "$FQDN_CNP" "$NS_B"; return
   fi
-  if [ "$HAVE_GPOL" != 1 ]; then
+  if ! have_allows; then
     result ac7 MANUAL "$EV; GeneratingPolicy missing, cannot test the generated allow. Apply allow-dns by hand in ${NS_B} and repeat the query for ${other}."
     delete_owned "$CNP" "$FQDN_CNP" "$NS_B"; return
   fi
-  annotate "$NS_B" allow-dns || { result ac7 ERROR "$EV"; delete_owned "$CNP" "$FQDN_CNP" "$NS_B"; return; }
-  if ! eventually "$SYNC_TIMEOUT" 2 cnp_exists "$NS_B" "$(gname allow-dns)"; then
+  allow_on "$NS_B" dns || { result ac7 ERROR "$EV"; delete_owned "$CNP" "$FQDN_CNP" "$NS_B"; return; }
+  if [ "$ALLOW_MODE" = kyverno ] && ! eventually "$SYNC_TIMEOUT" 2 cnp_exists "$NS_B" "$(gname allow-dns)"; then
     result ac7 INCONCLUSIVE "$EV; the generated $(gname allow-dns) CNP did not appear within ${SYNC_TIMEOUT}s"
   else
-    eventually 40 2 has_ip "$allowed" || true
-    dns_query "$NS_B" client "$allowed"; a2="$DNS_IP"
-    for _ in 1 2 3; do
-      dns_query "$NS_B" client "$other"; o2="$DNS_IP"
-      [ -n "$o2" ] && widened=1
-      sleep 2
-    done
-    ev "plus generated L4-only allow-dns: ${allowed} -> '${a2:-no answer}', ${other} -> '${o2:-no answer/refused}' (3 queries)"
+    if [ "$ALLOW_MODE" = label ]; then
+      # the label needs up to ~35 s to act and the allow is only visible through the widening itself: poll the other name for
+      # ${ALLOW_T}s; one that never resolves in that window is "no widening"
+      t_w=$SECONDS
+      if eventually "$ALLOW_T" 3 has_ip "$other"; then widened=1; ev "${other} resolved $((SECONDS - t_w))s after the label (widening)"; fi
+      o2="$DNS_IP"
+      eventually 40 2 has_ip "$allowed" || true
+      dns_query "$NS_B" client "$allowed"; a2="$DNS_IP"
+      ev "plus the label-selected L4-only allow-dns: ${allowed} -> '${a2:-no answer}', ${other} -> '${o2:-no answer/refused}' (polled for ${ALLOW_T}s)"
+    else
+      eventually 40 2 has_ip "$allowed" || true
+      dns_query "$NS_B" client "$allowed"; a2="$DNS_IP"
+      for _ in 1 2 3; do
+        dns_query "$NS_B" client "$other"; o2="$DNS_IP"
+        [ -n "$o2" ] && widened=1
+        sleep 2
+      done
+      ev "plus generated L4-only allow-dns: ${allowed} -> '${a2:-no answer}', ${other} -> '${o2:-no answer/refused}' (3 queries)"
+    fi
     if [ "$widened" = 1 ]; then
-      result ac7 FINDING "the L4-only allow-dns WIDENS the customer L7 DNS rule (other names resolve once it is added). ${EV}. Consequence: document that allow-dns / clusterwide DNS allow override customer FQDN allow-lists, or generate allow-dns with rules.dns matchPattern '*'."
+      result ac7 FINDING "the L4-only allow-dns WIDENS the customer L7 DNS rule (other names resolve once it is added). ${EV}. Consequence: document that allow-dns / clusterwide DNS allow override customer FQDN allow-lists, or ship allow-dns with rules.dns matchPattern '*' (enableDefaultDeny false does not cover L7)."
     elif [ -n "$a2" ]; then
       result ac7 PASS "L4-only allow-dns does NOT widen the customer L7 DNS rule. ${EV}"
     else
@@ -1925,7 +2462,7 @@ EOF
     fi
   fi
   delete_owned "$CNP" "$FQDN_CNP" "$NS_B"
-  unannotate "$NS_B" allow-dns
+  allow_off "$NS_B" dns
 }
 
 # ac8: drops in kube-system / giantswarm recorded as input for the app coverage audit (giantswarm/roadmap#4375)
@@ -1958,7 +2495,11 @@ ac8_drops_gs_namespaces() {
 
 # ac9: guidance recorded upstream
 ac9_record_guidance() {
-  result ac9 MANUAL "copy the winning webhook source (ac6), the L7/L4 DNS finding (ac7), map headroom (ac4), the sync/generate-existing behavior (ac5, ac5b) and the flap/bulk/restart findings into giantswarm/giantswarm#32658 (CNP guidance)."
+  if [ "$ALLOW_MODE" = label ]; then
+    result ac9 MANUAL "copy the winning webhook source (ac6), the L7/L4 DNS finding (ac7), map headroom (ac4), the label on/off latency (ac5), the bulk/flap findings and the nodeny result into giantswarm/giantswarm#32658 (CNP guidance)."
+  else
+    result ac9 MANUAL "copy the winning webhook source (ac6), the L7/L4 DNS finding (ac7), map headroom (ac4), the sync/generate-existing behavior (ac5, ac5b) and the flap/bulk/restart findings into giantswarm/giantswarm#32658 (CNP guidance)."
+  fi
 }
 
 # ---------------------------------------------------------------------------------------------- driver
@@ -1967,7 +2508,7 @@ print_summary() {
   local f r a s e
   f="$OUTDIR/results-$(date +%Y%m%d-%H%M%S).md"
   {
-    echo "# Spike results: provider ${PROVIDER}, context ${KCTX}"
+    echo "# Spike results: provider ${PROVIDER}, context ${KCTX}, allow mode ${ALLOW_MODE}"
     echo
     echo "| Check | Status | Evidence |"
     echo "|---|---|---|"
@@ -1985,7 +2526,9 @@ print_summary() {
 if [ "${SPIKE_SOURCE_ONLY:-}" = 1 ]; then return 0 2>/dev/null || exit 0; fi
 
 case "$CMD" in
-  list) for a in $(all_checks | tr ',' ' '); do echo "$a -> $(fn_for "$a")"; done; exit 0 ;;
+  list)
+    echo "allow mode: ${ALLOW_MODE} (SPIKE_ALLOW_MODE=${OTHER_MODE} lists the other set: only in ${OTHER_MODE} mode: ${OTHER_MODE_ONLY})"
+    for a in $(all_checks | tr ',' ' '); do echo "$a -> $(fn_for "$a")"; done; exit 0 ;;
   cleanup) cleanup; exit $? ;;
   setup|run)
     if [ "$CMD" = run ]; then
@@ -1993,7 +2536,7 @@ case "$CMD" in
       sel="${ONLY:-$(all_checks)}"
       IFS=',' read -r -a want <<< "$sel"
       for a in "${want[@]}"; do
-        fn_for "$a" >/dev/null || { echo "unknown function: $a (see: $0 list)" >&2; exit 2; }
+        fn_for "$a" >/dev/null || { echo "unknown function: $a$(other_mode_hint "$a") (see: $0 list)" >&2; exit 2; }
       done
     fi
     trap on_exit EXIT

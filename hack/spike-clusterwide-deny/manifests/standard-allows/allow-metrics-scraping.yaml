@@ -1,0 +1,29 @@
+# Kit copy of the label-selected standard allow "allow-metrics-scraping" (PRD "Standard allows (label-selected)").
+# Renamed ddn-spike-label-* so that the kit never touches a real policy. Selects every endpoint of a namespace labeled
+# policy.giantswarm.io/allow-metrics-scraping: "true" (cluster wide, so a CCNP; no per-namespace object, no Kyverno).
+# enableDefaultDeny false/false: a policy with an ingress or egress section otherwise puts the selected endpoints into
+# default deny for that direction, which would lock a labeled namespace down even without the clusterwide deny. With false
+# the allow is purely additive (cilium pkg/policy/api/rule.go DefaultDenyConfig, see ../../SOURCES.md). L4 only: it does
+# not cover L7 rules. Rules copied from ../generatingpolicies/generatingpolicy-allow-metrics-scraping.yaml.
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: ddn-spike-label-allow-metrics-scraping
+  labels:
+    spike.giantswarm.io/owner: default-deny-netpol
+spec:
+  description: "Spike: ingress from the GS monitoring agent (alloy-metrics in kube-system)."
+  endpointSelector:
+    matchExpressions:
+      - key: io.cilium.k8s.namespace.labels.policy.giantswarm.io/allow-metrics-scraping
+        operator: In
+        values:
+          - "true"
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            app.kubernetes.io/instance: alloy-metrics

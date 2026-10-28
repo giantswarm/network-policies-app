@@ -1,17 +1,23 @@
 # Spike kit: clusterwide deny with namespace opt-out
 
 Kit for [giantswarm/roadmap#4339](https://github.com/giantswarm/roadmap/issues/4339), slice 1 of the
-[default-deny-netpol PRD](https://github.com/giantswarm/cabbage-plans/blob/main/default-deny-netpol/PRD.md). It hand-applies the **clusterwide deny**, the clusterwide DNS allow and one
-Kyverno `GeneratingPolicy` per **standard allow** on a test workload cluster, then runs a probe per acceptance
-criterion and prints PASS / FAIL / FINDING / INCONCLUSIVE / ERROR / MANUAL / NOT-RUN with the observed evidence. Terms follow
-`context/glossary.md`.
+[default-deny-netpol PRD](https://github.com/giantswarm/cabbage-plans/blob/main/default-deny-netpol/PRD.md). It hand-applies the **clusterwide deny**, the clusterwide DNS allow and the **standard allows** on a test workload cluster,
+then runs a probe per acceptance criterion and prints PASS / FAIL / FINDING / INCONCLUSIVE / ERROR / MANUAL / NOT-RUN with the
+observed evidence. Terms follow `context/glossary.md`.
+
+**Two modes, selected with `SPIKE_ALLOW_MODE`:** `label` (the default) applies the standard allows as five static,
+label-selected `CiliumClusterwideNetworkPolicy`s that a namespace label switches on and off (see "Label mode" below);
+`kyverno` is the **historical** mode that generates one `CiliumNetworkPolicy` per namespace with Kyverno `GeneratingPolicy`s
+from namespace annotations. It is kept to reproduce the results recorded on #4339 and led to the label-selected design
+(see "Kyverno mode (historical)").
 
 **Everything the kit creates is named `ddn-spike-*` and labeled `spike.giantswarm.io/owner=default-deny-netpol`**, so it
 can never collide with, or delete, the real chart objects (`default-deny-all-namespaces`, `allow-dns-all-namespaces`,
 the real GeneratingPolicies, ...). The preflight refuses to run if a kit name already exists without that label, and
-every delete is either label-selected (`cleanup`) or name plus owner-label checked. The kit's GeneratingPolicies only act
-on namespaces carrying the owner label, so a real namespace that happens to carry a `policy.giantswarm.io/allow-*`
-annotation is not touched.
+every delete is either label-selected (`cleanup`) or name plus owner-label checked. The label CCNPs select every namespace
+carrying a `policy.giantswarm.io/allow-*` label (that is what a standard allow is), so a real namespace that already carries one
+is allowed by the kit's CCNP as well; the preflight cannot know, so use a dedicated cluster. In kyverno mode the kit's
+GeneratingPolicies only act on namespaces carrying the owner label.
 
 ## What is in here
 
@@ -19,12 +25,86 @@ annotation is not touched.
 |---|---|
 | `manifests/ccnp-default-deny-all-namespaces.yaml` | **Clusterwide deny** (`ddn-spike-default-deny-all-namespaces`): all endpoints except namespaces labeled `policy.giantswarm.io/default-deny: "false"` (**namespace opt-out**); `NotIn` also selects unlabeled namespaces |
 | `manifests/ccnp-allow-dns-all-namespaces.yaml` | clusterwide DNS allow (`ddn-spike-allow-dns-all-namespaces`), same selector, DNS targets copied from network-policies-app `allow-dns.yaml` |
-| `manifests/generatingpolicies/*.yaml` | six `GeneratingPolicy` `ddn-spike-allow-*` (`policies.kyverno.io/v1beta1`), one per **generation annotation**; the file name `generatingpolicy-<annotation>.yaml` is the single source the script derives its annotation list from; each generates a CNP of the same `ddn-spike-allow-*` name |
-| `manifests/kyverno-rbac-ciliumnetworkpolicies.yaml` | ClusterRole `ddn-spike-background-controller-ciliumnetworkpolicies` aggregated into Kyverno's background controller |
+| `manifests/standard-allows/allow-<x>.yaml` | **label mode**: five CCNPs `ddn-spike-label-allow-<x>` (`x` = `dns`, `kube-apiserver`, `webhook-ingress`, `ingress-controller`, `metrics-scraping`), each selecting namespaces labeled `policy.giantswarm.io/allow-<x>: "true"`, with `enableDefaultDeny: {ingress: false, egress: false}`; rules copied from the GeneratingPolicy bodies |
+| `manifests/same-namespace-policy.yaml` | **Same-namespace policy** template: CNP `ddn-spike-same-namespace` (`endpointSelector: {}`, ingress `fromEndpoints: [{}]`, egress `toEndpoints: [{}]`, `enableDefaultDeny` false/false), no namespace inside; the checks apply it per namespace with `kubectl -n <ns> apply -f` |
+| `manifests/generatingpolicies/*.yaml` | **kyverno mode (historical)**: six `GeneratingPolicy` `ddn-spike-allow-*` (`policies.kyverno.io/v1beta1`), one per **generation annotation**; the file name `generatingpolicy-<annotation>.yaml` is the single source the script derives its annotation list from; each generates a CNP of the same `ddn-spike-allow-*` name |
+| `manifests/kyverno-rbac-ciliumnetworkpolicies.yaml` | **kyverno mode**: ClusterRole `ddn-spike-background-controller-ciliumnetworkpolicies` aggregated into Kyverno's background controller |
 | `manifests/probes/` | probe namespaces/pods (netshoot) and the webhook listener; the DNS probe pods in `kube-system` / `giantswarm` are created inline by the `dns` check |
 | `manifests/webhook-variants/` | candidate webhook-ingress sources, narrowest first |
 | `run-checklist.sh` | setup, one function per acceptance criterion, cleanup |
 | `SOURCES.md` | file:line evidence for every non-obvious field |
+
+## Label mode (default)
+
+`SPIKE_ALLOW_MODE=label` (the default) implements the PRD section "Standard allows (label-selected)" (design: giantswarm/cabbage-plans
+`default-deny-netpol/PRD.md`, grill log `grill-sessions/2026-10-27-label-selected-allows.md` Q12 and its addendum):
+
+- **No Kyverno.** `setup` applies the probes, the five label CCNPs in `manifests/standard-allows/` and the clusterwide deny. It
+  applies no GeneratingPolicy and no Kyverno RBAC, and the preflight skips every Kyverno step (scale guard, Kyverno ingress,
+  `generator.apply()` detection, GeneratingPolicy CRD). Instead it prints the Cilium agent image (`enableDefaultDeny` needs
+  Cilium 1.16 or newer) and `setup` warns when a label CCNP has lost its `enableDefaultDeny` after the apply (a Cilium that
+  does not know the field would drop it, and the allow would then put every labeled namespace into default deny).
+- **Allow labels.** A namespace label `policy.giantswarm.io/allow-<x>: "true"` switches a standard allow on, removing it
+  switches it off. Each CCNP selects `io.cilium.k8s.namespace.labels.policy.giantswarm.io/allow-<x>` `In ["true"]`, always
+  renders, and carries `enableDefaultDeny: {ingress: false, egress: false}`: a plain allow-only CCNP would otherwise put a
+  labeled namespace into default deny without the clusterwide deny (`SOURCES.md`, "enableDefaultDeny"). `allow-dns` is L4
+  only, never `rules.dns`, because `enableDefaultDeny: false` does not cover L7 rules. `allow-webhook-ingress` allows
+  `kube-apiserver` + `remote-node`.
+- **Same-namespace policy.** Same-namespace traffic is denied under the clusterwide deny. It is allowed only by applying
+  `manifests/same-namespace-policy.yaml` in the namespace; the checks do that per namespace.
+- **Latency.** A label change goes through Cilium's identity recompute and needs up to about 35 s to act (PRD: 14-35 s on, 10-35 s off on
+  CAPZ). Every wait for a label effect is therefore 60 s or more (`SPIKE_LABEL_TIMEOUT`, `SPIKE_PRE_TIMEOUT`, default 60) and the
+  measured seconds are recorded in the evidence (they include about 3-4 s of probe overhead: a curl timeout is 3 s).
+- **Switching allows.** `reset_state` removes the allow labels and the Same-namespace policy between checks; the checks use
+  `allow_on` / `allow_off` (a label here, an annotation in kyverno mode).
+
+Checks that differ in label mode (the others are shared; see the table below):
+
+| Check | Label mode |
+|---|---|
+| `same-ns` | additionally: same-namespace is denied without `ddn-spike-same-namespace`, allowed with it applied, and denied again after deleting it; cross-namespace stays blocked with it |
+| `ac5` | **kyverno mode:** **label on/off**: allow-kube-apiserver (probed by ClusterIP) labeled and unlabeled `SPIKE_LABEL_ROUNDS` (3) times; records the on and off latency of every round; removal must block every time (`FAIL` otherwise) |
+| `flap` | **kyverno mode:** all five labels + Same-namespace policy on a namespace, a continuous same-namespace + DNS probe loop, then unrelated Namespace updates (dummy label and annotation add/remove) for `SPIKE_FLAP_SECONDS`. `FAIL` if a label CCNP or the Same-namespace policy is deleted or recreated (label mode must delete nothing); probe failures during the updates are reported as `FINDING` (unrelated *label* changes recompute the namespace's identities) |
+| `bulk` | **kyverno mode:** all five labels in ONE request (fresh namespace `ddn-spike-bulk`) versus one by one (`ddn-spike-seq`), each with a probe pod. Samples at `SPIKE_BULK_SAMPLES` (default `45 90 150`, seconds after the bulk request, labeled with the real elapsed time): all five labels still present and the two probe-able allows (allow-kube-apiserver by ClusterIP, allow-dns) still working. Expected `PASS`; the time until the labels act is recorded |
+| `nodeny` | **`enableDefaultDeny: false` proof**, replaces `ac5b` and `restart`. See below |
+| `dns`, `apiserver`, `ac6`, `ac7`, `ac4` | same checks with the label instead of the annotation: `dns` and `apiserver` record on/off seconds; `ac6` polls the real `ddn-spike-label-allow-webhook-ingress` until the API server reaches the listener; `ac7` polls the other name for 60 s to see whether the label-selected allow-dns widens a customer L7 rule; `ac4` measures the policy map with the five labels + Same-namespace policy |
+
+`ac5b` and `restart` exist only in kyverno mode (`--only ac5b` in label mode is rejected with a hint, before anything is applied).
+
+**`nodeny`.** Without the clusterwide deny, setting allow labels and applying the Same-namespace policy must not restrict the
+namespace (the PRD's `enableDefaultDeny` claim). The check deletes **only the kit deny CCNP** `ddn-spike-default-deny-all-namespaces`
+(refusing when it does not carry the owner label), creates a fresh owned namespace `ddn-spike-nodeny` with a client and a server, sets all
+five allow labels in one request and applies `ddn-spike-same-namespace`, and then probes for `SPIKE_LABEL_SETTLE` seconds (default 40,
+longer than the label latency): cross-namespace in both directions, same-namespace and, when it was reachable before, the external URL
+must stay reachable. It also prints Cilium's endpoint policy enforcement of the namespace's endpoints (informational:
+`Disabled/Disabled` expected) and whether the identity carries the allow-dns label. **The deny is always put back**: the check
+re-applies it and verifies that it exists, and sets a flag first so the exit trap (INT, TERM, error exit, `exit` in the middle of the
+check) re-applies it too; when the re-apply fails the script prints the apply command and exits non-zero. It runs after `ac2` on
+purpose: the re-applied deny has a new uid, and `ac2`'s pre-deny baseline is tied to the old one. Because the deny disappears for the
+duration of the check (a minute or two), run it only on the dedicated test cluster, like everything else here.
+
+Hand-applying label mode:
+
+```bash
+kubectl apply -f manifests/probes/probes.yaml
+kubectl apply -f manifests/standard-allows/
+kubectl apply -f manifests/ccnp-default-deny-all-namespaces.yaml   # the cluster is now denied
+kubectl label namespace <ns> policy.giantswarm.io/allow-dns=true policy.giantswarm.io/allow-kube-apiserver=true   # takes up to ~35 s
+kubectl -n <ns> apply -f manifests/same-namespace-policy.yaml
+kubectl label namespace <ns> policy.giantswarm.io/default-deny=false   # namespace opt-out, live
+```
+
+## Kyverno mode (historical)
+
+`SPIKE_ALLOW_MODE=kyverno` runs the original kit: six Kyverno `GeneratingPolicy`s generate `CiliumNetworkPolicy`s from namespace
+annotations. It is kept **only to reproduce the results recorded on giantswarm/roadmap#4339**
+(<https://github.com/giantswarm/roadmap/issues/4339>: generated CNPs vanishing, one-request annotation yielding 1 of 6 policies,
+no generate-existing, annotation removal not always deleting) and is not the design any more. Shield's statement that
+`GeneratingPolicy` still has known upstream issues whose fixes land only in Kyverno 1.19 and later (recommending `ClusterPolicy`
+until Giant Swarm is on 1.19.x, which is deprecated upstream) is in the PRD under "Why not Kyverno generation any more".
+Everything below up to "Prerequisites", the Kyverno-specific design notes and the "First real run" describe this mode; the
+checks `ac5` (sync), `ac5b`, `flap` (Synchronize regeneration), `bulk` (annotations), `restart` and the annotation variants of the
+shared checks run in it.
 
 Versions found: **Giant Swarm deploys Kyverno v1.18.2** (security-bundle pins `kyverno` app 0.25.0 and `kyverno-crds`
 1.18.0; kyverno-app 0.25.0 "Updated kyverno to upstream version v1.18.2"). `GeneratingPolicy` exists in that release
@@ -50,11 +130,14 @@ webhook range). Fine-grained mode is not a one-variable change: it also sets an 
 `SPIKE_GPOL_MATCHCOND=owner` adds a `matchConditions` entry so the API server only sends admission requests for
 namespaces carrying the kit owner label (in `object` or `oldObject`). Kyverno re-evaluates `matchConditions` in its
 background controller (generate-existing, update requests), where an absent object is `{}` rather than null, so the
-expression guards with `has(o.metadata)` (`[object, oldObject].exists(...)`). The option it also makes the policies fine-grained. On the CAPA cluster (Kyverno 1.17.2)
+expression guards with `has(o.metadata)` (`[object, oldObject].exists(...)`). The option also makes the policies fine-grained. On the CAPA cluster (Kyverno 1.17.2)
 `SPIKE_GPOL_WEBHOOK=finegrained` alone did not stop the delayed deletion in `bulk`, while a control policy restricted
 by `matchConditions` kept its downstream for 4 minutes; this option tests that difference.
 
 ## Design notes that differ from a naive reading of the PRD
+
+The bullets about annotations, the Namespace webhook, Kyverno ingress, generate-existing and Namespace UPDATEs apply to kyverno mode
+only; the health-endpoint and CoreDNS-ingress bullets apply to both modes.
 
 - **The annotation check lives in a policy variable, not in `matchConditions`.** Kyverno does put a GeneratingPolicy's
   match conditions on the webhook it registers, and the Kubernetes API server evaluates `matchConditions` with both
@@ -130,7 +213,7 @@ by `matchConditions` kept its downstream for 4 minutes; this option tests that d
 - Provisional values: metrics-scraping source is `alloy-metrics` in `kube-system`; webhook ports are
   `443,4443,8443,9443,10250`; webhook source entities are `kube-apiserver` + `remote-node` until `ac6` says otherwise.
 
-## First real run (CAPA, Kyverno 1.17.2)
+## First real run (CAPA, Kyverno 1.17.2, historical)
 
 First run on a CAPA test cluster (release aws-36.1.0, cilium-app 1.6.1, Kyverno v1.17.2, 3 control plane + 4 workers).
 This kit was fixed after it; the table lists what the run showed and what changed.
@@ -165,7 +248,8 @@ This kit was fixed after it; the table lists what the run showed and what change
   run this against a shared or production cluster. `kube-system` and `giantswarm` keep DNS only through the existing
   per-namespace `default-allow-dns` (network-policies-app `allowEgressToDNS`); the script reports whether it exists.
 - Cilium with CCNP support (cilium-app, or Azure-managed Cilium on AKS) and the `CiliumClusterwideNetworkPolicy` CRD.
-- **security-bundle with Kyverno running** (kyverno-app and `kyverno-crds`), so the `GeneratingPolicy` CRD exists.
+- Label mode (default): **Cilium 1.16 or newer** (`enableDefaultDeny`; on AKS the Azure-managed Cilium version decides). No Kyverno needed.
+- Kyverno mode only: **security-bundle with Kyverno running** (kyverno-app and `kyverno-crds`), so the `GeneratingPolicy` CRD exists.
   Without it the generate checks degrade to MANUAL.
 - `kubectl` with cluster-admin rights, `bash`. `timeout` or `gtimeout` is used when present to bound every `kubectl exec`
   that watches something; without it the script falls back to killing the process group. The probe image `nicolaka/netshoot:v0.13` and `registry.k8s.io/pause:3.9`
@@ -189,7 +273,13 @@ SPIKE_CONFIRM=<test-wc-context> ./run-checklist.sh --kubeconfig ~/wc.kubeconfig 
 # a subset
 SPIKE_CONFIRM=<ctx> ./run-checklist.sh --context <ctx> --provider aks --only ac1,ac6 run
 
-# opt in to the "Kyverno down" generate-existing test: scales ALL kyverno deployments to 0 and back. Typically 1-3
+# the label-mode checks only (what CAPA and CAPZ re-run): label on/off latency, bulk, flap, nodeny
+SPIKE_CONFIRM=<ctx> ./run-checklist.sh --context <ctx> --only same-ns,ac5,flap,bulk,nodeny run
+
+# the historical Kyverno GeneratingPolicy mode, to reproduce the results recorded on #4339
+SPIKE_ALLOW_MODE=kyverno SPIKE_CONFIRM=<ctx> ./run-checklist.sh --context <ctx> run
+
+# (kyverno mode) opt in to the "Kyverno down" generate-existing test: scales ALL kyverno deployments to 0 and back. Typically 1-3
 # minutes; worst case about 10 minutes (up to 180 s for the pods to go away, 5 s fixed wait, up to 300 s per deployment
 # for the rollout to complete again and up to 180 s for the CNP). Refused when a Kyverno-managed webhook is not
 # failurePolicy Ignore AND matches Namespaces, Deployments (scale) or everything: it would block the annotation or the
@@ -203,7 +293,7 @@ SPIKE_CONFIRM=<ctx> ./run-checklist.sh --context <ctx> --provider aks --only ac1
 # cannot be read, and treats `*`-prefixed and `namespaces*`/`deployments*` resource tokens as matching.
 # Once the restore has started it cannot be interrupted (Ctrl-C and SIGTERM are ignored, a closed pipe such as a killed
 # `| tee` is ignored too) and may take up to 5 minutes per deployment (the rollout wait); that is intentional.
-SPIKE_ALLOW_KYVERNO_SCALE=true SPIKE_CONFIRM=<ctx> ./run-checklist.sh --context <ctx> --only ac5b run
+SPIKE_ALLOW_MODE=kyverno SPIKE_ALLOW_KYVERNO_SCALE=true SPIKE_CONFIRM=<ctx> ./run-checklist.sh --context <ctx> --only ac5b run
 ```
 
 `--provider` is one of `aws`, `azure`, `aks`, `vsphere`, ...; `aks` switches `ac3` to its AKS wording. Evidence files
@@ -213,9 +303,12 @@ The clusterwide deny **stays applied** after `run` so you can keep poking; remov
 on every exit (normal, error, Ctrl-C) and prints the exact `cleanup` command for the targeted context; it removes the
 deny on exit only with `SPIKE_CLEANUP_ON_EXIT=true`.
 
-Tuning for the Kyverno generation checks: `SPIKE_BULK_SAMPLES` (default `"5 60 150 240"`, seconds after the bulk annotation at
-which `bulk` counts the CNPs), `SPIKE_ANNOTATE_GAP` (default 2, seconds between one-at-a-time annotations), `SPIKE_HEALTH_WAIT`
-(default 20, seconds the pre-deny baseline waits per agent for `Cluster health` to reach N/N).
+Tuning: `SPIKE_ALLOW_MODE` (`label` default, `kyverno`), `SPIKE_BULK_SAMPLES` (label default `"45 90 150"`, kyverno `"5 60 150 240"`:
+seconds after the bulk request at which `bulk` samples; the sample is labeled with the real elapsed time),
+`SPIKE_ANNOTATE_GAP` (default 2, seconds between one-at-a-time label/annotation requests), `SPIKE_HEALTH_WAIT`
+(default 20, seconds the pre-deny baseline waits per agent for `Cluster health` to reach N/N). Label mode: `SPIKE_LABEL_TIMEOUT`
+(60), `SPIKE_PRE_TIMEOUT` (60), `SPIKE_LABEL_SETTLE` (40), `SPIKE_LABEL_ROUNDS` (3). Kyverno mode: `SPIKE_GEN_FN`, `SPIKE_GPOL_WEBHOOK`,
+`SPIKE_GPOL_TIMEOUT`, `SPIKE_GPOL_MATCHCOND` (see "Kyverno mode (historical)"). `./run-checklist.sh --help` lists all.
 
 Exit status of `run`: 1 when any check ended `FAIL` or `ERROR`, 0 otherwise (`INCONCLUSIVE`, `FINDING`, `PROBE-FAIL`,
 `MANUAL` do not change it: read the table); 2 for usage errors (an unknown name in `--only` is rejected **before**
@@ -225,11 +318,13 @@ Statuses: `PASS` / `FAIL` as expected; `FINDING` = a design risk was measured (`
 and `flap`/`ac4` "generated-then-deleted": an allow that was generated and then disappeared without regeneration, as opposed
 to FAIL "never generated"), not a kit failure; `PROBE-FAIL` = `flap` saw probe failures but no CNP regeneration, so the cause is elsewhere; `INCONCLUSIVE` = a probe could not run or its precondition did not hold (pods not Ready, no server IP,
 connection refused instead of a timeout, `dig`/`exec` failure, baseline already reachable): never a PASS; `ERROR` = a
-kit operation failed (for example the `ac5` hand-edit patch); `NOT-RUN` / `MANUAL` as before.
+kit operation failed (for example the `ac5` hand-edit patch); `NOT-RUN` / `MANUAL` as before. In label mode `flap` is `FAIL` when
+anything was deleted or recreated and `FINDING` when only the probe saw failures; `ac5` and `bulk` are `FAIL` when a label does not act,
+persist or block again.
 Blocked means **curl timeout (exit 28)** or an explicit **dig timeout**; refused connections, SERVFAIL/REFUSED answers
 and exec failures are not evidence of a block.
 
-Hand-applying instead of using the script:
+Hand-applying the historical kyverno mode instead of using the script (label mode: see "Label mode"):
 
 ```bash
 kubectl apply -f manifests/kyverno-rbac-ciliumnetworkpolicies.yaml
@@ -244,24 +339,28 @@ kubectl label namespace <ns> policy.giantswarm.io/default-deny=false   # namespa
 
 ## Checklist functions
 
-| Function | Acceptance criterion of giantswarm/roadmap#4339 | Result type |
+| Function | Acceptance criterion of giantswarm/roadmap#4339 (kyverno-mode wording; label-mode variants in the last rows and in "Label mode") | Result type |
 |---|---|---|
 | `same-ns` | same-namespace (and cross-namespace, external) traffic is denied when unannotated; opted-out control works. External is only asserted if it was reachable before the deny | automated |
 | `ac1` | opt-out label is part of the Cilium identity **and** a flip takes effect live, same pod uid/restart count. The identity half asks the agent on the probe pod's node (`identity list --endpoints`, then the full list) for an identity carrying both the pod-namespace label and `k8s:io.cilium.k8s.namespace.labels.policy.giantswarm.io/default-deny=false`. PASS needs both halves; if no agent exec is possible, or no such identity is found, the result is INCONCLUSIVE (the behavioural half alone never gives PASS) | automated |
-| `ac2` | kubelet readiness/liveness probes keep working (server Ready, restart count did not rise); hostNetwork pods: snapshot taken at least 40 s after the deny and diffed against the pre-deny baseline (only newly not-ready pods fail); Cilium `Cluster health` is recorded on every agent before the deny (baseline, in `baseline.meta`) and after it, both numbers are reported, and the check FAILs only when more nodes are unreachable than before (no baseline: a shortfall is INCONCLUSIVE, an unreadable line is INCONCLUSIVE); the health endpoint's policy enforcement is listed per agent. The baseline is only trusted if `baseline.meta` ties it to the same context and the same deny uid | automated, extra MANUAL hints |
+| `ac2` | kubelet readiness/liveness probes keep working (server Ready, restart count did not rise); hostNetwork pods: snapshot taken at least 40 s after the deny and diffed against the pre-deny baseline (only newly not-ready pods fail); Cilium `Cluster health` is recorded on every agent before the deny (baseline, in `baseline.meta`) and after it, both numbers are reported, and the check FAILs only when more nodes are unreachable than before (no baseline: a shortfall is INCONCLUSIVE, an unreadable line is INCONCLUSIVE); the health endpoint's policy enforcement is listed per agent. The baseline is only trusted if `baseline.meta` ties it to the same context and the same deny uid | automated, extra MANUAL hints. An agent without a reading now, without a baseline, or gone since the baseline, and a changed node count (total != baseline total) are INCONCLUSIVE, never FAIL; FAIL needs more unreachable nodes than before on an agent with an unchanged node count | automated |
 | `ac3` | AKS: CCNP and selectors work (derived from `ac1`, which is auto-run when needed), drop signals present (hubble-relay, retina/ACNS, drop metrics), effective `bpf-policy-map-max`. Non-AKS: PASS needs `ac1` PASS **and** at least one drop signal **and** `bpf-policy-map-max` set; otherwise INCONCLUSIVE (FAIL if `ac1` failed) | MANUAL on AKS (`az aks show ...`), judged elsewhere |
 | `dns` | DNS with clusterwide allow off vs `allow-dns` annotation vs clusterwide allow on; **probe pods in `kube-system` and `giantswarm` must resolve in both states** and `default-allow-dns` must exist there | automated |
 | `apiserver` | `allow-kube-apiserver` end to end: a pod curls `https://<kubernetes ClusterIP>` (no DNS involved): blocked without the annotation, TLS/HTTP answer with it, blocked again after removal | automated |
-| `ac5` | GeneratingPolicy sync: annotation -> CNP, hand edit reverted, hand delete recreated, annotation removal deletes CNP | automated |
-| `ac5b` | generate-existing: policy created after annotation; Kyverno-down case behind `SPIKE_ALLOW_KYVERNO_SCALE=true`. Evidence: seconds waited, `kubectl -n kyverno get updaterequests.kyverno.io` count before/after, background-controller log lines for the policy, written to `spike-results/ac5b-evidence.txt` | automated / MANUAL commands |
-| `flap` | six annotations on a namespace (one at a time, 2 s apart; allows that disappear before the updates start are reported as FINDING "generated-then-deleted", allows that never appear as FAIL), a continuous same-namespace + DNS probe loop in the client pod (a curl+dig pair per iteration, ~5-10 pairs/s) for `SPIKE_FLAP_SECONDS` (60), while the script makes unrelated Namespace updates (dummy label/annotation add/remove). Records CNP DELETED/ADDED events (`kubectl get -w --output-watch-events`, 1 s resolution), uid/creationTimestamp changes and probe failures; keeps observing until the regeneration settles (all CNPs back, no event for 10 s, max 30 s) and reports the measured delete-to-recreate gap | automated; PASS, FINDING (regeneration seen) or PROBE-FAIL (failures without regeneration) |
-| `bulk` | fresh namespaces `ddn-spike-bulk` (all six annotations in ONE request) and `ddn-spike-seq` (control: one at a time, 2 s apart); CNPs counted at 5, 60, 150 and 240 s (`SPIKE_BULK_SAMPLES`). PASS when all six persist through the last sample; FINDING "bulk annotation: N/6 generated then deleted after ~Xs without regeneration" (also for deleted-and-regenerated, partial, or never generated while the control worked); FAIL when nothing is generated in either namespace. UpdateRequest counts and background-controller log lines go to `spike-results/bulk-evidence.txt`. Takes about 4.5 min | automated; PASS or FINDING |
-| `restart` | annotate, wait for the CNP, restart the Kyverno background controller (rolling), remove the annotation: the CNP must be gone within 120 s (FAIL if it lingers). Evidence as for `ac5b`, in `spike-results/restart-evidence.txt`. Skip with `SPIKE_SKIP_KYVERNO_RESTART=true` | automated |
+| `ac5` | **kyverno mode:** GeneratingPolicy sync: annotation -> CNP, hand edit reverted, hand delete recreated, annotation removal deletes CNP | automated |
+| `ac5b` | **kyverno mode only:** generate-existing: policy created after annotation; Kyverno-down case behind `SPIKE_ALLOW_KYVERNO_SCALE=true`. Evidence: seconds waited, `kubectl -n kyverno get updaterequests.kyverno.io` count before/after, background-controller log lines for the policy, written to `spike-results/ac5b-evidence.txt` | automated / MANUAL commands |
+| `flap` | **kyverno mode:** six annotations on a namespace (one at a time, 2 s apart; allows that disappear before the updates start are reported as FINDING "generated-then-deleted", allows that never appear as FAIL), a continuous same-namespace + DNS probe loop in the client pod (a curl+dig pair per iteration, ~5-10 pairs/s) for `SPIKE_FLAP_SECONDS` (60), while the script makes unrelated Namespace updates (dummy label/annotation add/remove). Records CNP DELETED/ADDED events (`kubectl get -w --output-watch-events`, 1 s resolution), uid/creationTimestamp changes and probe failures; keeps observing until the regeneration settles (all CNPs back, no event for 10 s, max 30 s) and reports the measured delete-to-recreate gap | automated; PASS, FINDING (regeneration seen) or PROBE-FAIL (failures without regeneration) |
+| `bulk` | **kyverno mode:** fresh namespaces `ddn-spike-bulk` (all six annotations in ONE request) and `ddn-spike-seq` (control: one at a time, 2 s apart); CNPs counted at 5, 60, 150 and 240 s (`SPIKE_BULK_SAMPLES`). PASS when all six persist through the last sample; FINDING "bulk annotation: N/6 generated then deleted after ~Xs without regeneration" (also for deleted-and-regenerated, partial, or never generated while the control worked); FAIL when nothing is generated in either namespace. UpdateRequest counts and background-controller log lines go to `spike-results/bulk-evidence.txt`. Takes about 4.5 min | automated; PASS or FINDING |
+| `restart` | **kyverno mode only:** annotate, wait for the CNP, restart the Kyverno background controller (rolling), remove the annotation: the CNP must be gone within 120 s (FAIL if it lingers). Evidence as for `ac5b`, in `spike-results/restart-evidence.txt`. Skip with `SPIKE_SKIP_KYVERNO_RESTART=true` | automated |
 | `ac6` | narrowest working webhook-ingress source: per-variant delta of API-server connections to a logging listener (baseline > 0 = INCONCLUSIVE), then the **real generated `allow-webhook-ingress`** (443/4443/8443/9443/10250) | automated; MANUAL fallback commands on failure |
 | `ac7` | L4-only DNS allow vs customer L7 DNS (FQDN) rule: does the generated `allow-dns` widen the L7 allow-list? PASS only if the L7 rule was effective first, the allowed name still resolves afterwards and the generated CNP exists | automated finding; INCONCLUSIVE/MANUAL if a precondition fails |
-| `ac4` | per-endpoint BPF policy-map usage with deny + DNS allow + six allows and `SPIKE_LOAD_PODS` identities; action above ~50% of the limit | automated; MANUAL if no agent exec |
+| `ac4` | per-endpoint BPF policy-map usage with deny + DNS allow + six allows (label mode: five allow labels + the Same-namespace policy) and `SPIKE_LOAD_PODS` identities; action above ~50% of the limit | automated; MANUAL if no agent exec |
 | `ac8` | drops in `kube-system` / `giantswarm` for the app coverage audit (giantswarm/roadmap#4375): raw `cilium-dbg monitor --type drop` capture; every exec is bounded by the window (in-container `timeout` plus local `timeout`/`gtimeout`, else process-group kill) | MANUAL (data collected) |
 | `ac9` | record guidance in giantswarm/giantswarm#32658 | MANUAL |
+| `ac5` (label mode) | **label on/off**: allow-kube-apiserver labeled and unlabeled `SPIKE_LABEL_ROUNDS` times; on and off latency per round; removal must block every time (FAIL otherwise) | automated |
+| `flap` (label mode) | unrelated Namespace updates on a namespace with all five labels + Same-namespace policy: nothing may be deleted or recreated (FAIL otherwise); probe failures are reported as FINDING | automated finding |
+| `bulk` (label mode) | five labels in one request vs one by one; labels present and acting at every sample (real elapsed seconds); expected PASS | automated |
+| `nodeny` (label mode only) | without the clusterwide deny (the kit deny is deleted, owner-checked, and always re-applied), allow labels + Same-namespace policy do not restrict cross-namespace or external traffic (`enableDefaultDeny: false`) | automated |
 
 Manual commands the script cannot run for you:
 
@@ -287,12 +386,13 @@ SPIKE_DROP_WINDOW=600 SPIKE_CONFIRM=<ctx> ./run-checklist.sh --context <ctx> --o
 ```
 
 First restores Kyverno if the saved replica ConfigMap `kyverno/ddn-spike-kyverno-replicas` exists (from any directory or
-machine: the state is in the cluster, not in `spike-results/`). Then deletes, **by the label
-`spike.giantswarm.io/owner=default-deny-netpol` only**: the CCNPs (clusterwide deny first, which restores the cluster),
-the six GeneratingPolicies, the validating webhook configuration, the ClusterRole, the DNS probe pods in `kube-system` /
-`giantswarm`, the replica ConfigMap, and the `ddn-spike-*` namespaces (which takes the generated CNPs with them).
-Objects without that label are not touched; the other deletes in the script go through a name plus owner-label check
-and refuse otherwise.
+machine: the state is in the cluster, not in `spike-results/`; a no-op in label mode). Then deletes, **by the label
+`spike.giantswarm.io/owner=default-deny-netpol` only**: the CCNPs (clusterwide deny first, which restores the cluster; the DNS
+allow and the five label CCNPs go in the same call), the CNPs of the kit in all namespaces (the Same-namespace policies and any
+generated CNPs), the GeneratingPolicies, the validating webhook configuration, the ClusterRole, the DNS probe pods in
+`kube-system` / `giantswarm`, the replica ConfigMap, and the `ddn-spike-*` namespaces. Before the namespaces go it removes the five
+allow labels from the kit namespaces, and only from namespaces carrying the owner label. Objects without that label are not
+touched; the other deletes in the script go through a name plus owner-label check and refuse otherwise.
 Emergency rollback without the script: `kubectl delete ciliumclusterwidenetworkpolicy ddn-spike-default-deny-all-namespaces`.
 
 ## Results table (copy per provider)
@@ -303,33 +403,36 @@ Provider: ______  Cluster / version: ______  Cilium version: ______  Kyverno: __
 
 | Check | AWS (CAPA) | Azure (CAPZ) | vSphere | AKS | Notes |
 |---|---|---|---|---|---|
-| same-ns: unannotated traffic denied | | | | | |
+| same-ns: unlabeled traffic denied; Same-namespace policy allows it | | | | | |
 | ac1: opt-out in identity, live flip, no restart (flip time s) | | | | | |
 | ac2: kubelet probes, hostNetwork, Cilium health | | | | | |
 | ac3: CCNP + namespace selector work | | | | | |
 | ac3: drop signals (hubble / ACNS / metrics) | | | | | |
 | ac3: effective policy-map size | | | | | |
 | dns: off denied / `allow-dns` works / clusterwide works / kube-system + giantswarm keep DNS | | | | | |
-| ac5: sync (revert edit, delete on annotation removal) | | | | | |
-| ac5b: generate-existing (policy create / Kyverno down) | | | | | |
+| ac5 (label): allow label on / off latency, 3 rounds (s); removal blocked every time | | | | | |
 | apiserver: allow-kube-apiserver end to end | | | | | |
-| flap: CNP regeneration on unrelated Namespace updates (deleted x, gap s, probe failures) | | | | | |
-| restart: annotation removed after background-controller restart deletes the CNP (s) | | | | | |
+| flap (label): objects deleted/recreated on unrelated Namespace updates (must be 0), probe failures | | | | | |
+| nodeny: allow label + Same-namespace policy do not restrict traffic without the clusterwide deny | | | | | |
 | ac6: narrowest webhook-ingress source | | | | | |
 | ac7: L4 DNS allow vs customer L7 DNS rule | | | | | |
-| bulk: all six annotations in one request persist (counts at 5/60/150/240 s) vs one by one | | | | | |
+| bulk (label): all five labels in one request act and persist (samples at 45/90/150 s) vs one by one | | | | | |
 | ac4: max map entries / limit / % | | | | | |
 | ac8: drops in kube-system / giantswarm (counts, top apps) | | | | | |
 | ac9: guidance recorded in giantswarm/giantswarm#32658 | | | | | |
 
 Status per cell: PASS / FAIL / FINDING / PROBE-FAIL / INCONCLUSIVE / ERROR / MANUAL / NOT-RUN / n/a, plus the evidence value.
+The historical Kyverno results (ac5 sync, ac5b, flap regeneration, restart, bulk annotations) stay recorded on #4339; reproduce them
+with `SPIKE_ALLOW_MODE=kyverno`.
 
 ## Known limits of the kit
 
-- Ingress-controller and metrics-scraping allows are verified by generation only (the CNP appears and syncs); an end to
-  end probe needs a real Envoy Gateway / alloy-metrics source, because probe pods in those namespaces would be denied
-  themselves. Verify with `hubble observe` or a real HTTPRoute. (`allow-kube-apiserver` and `allow-webhook-ingress` do
-  have end-to-end probes: `apiserver`, `ac6`.)
+- Ingress-controller and metrics-scraping allows are verified by generation only (kyverno mode: the CNP appears and syncs) or by
+  label presence and policy-map size only (label mode: `bulk`, `ac4`); an end to end probe needs a real Envoy Gateway /
+  alloy-metrics source, because probe pods in those namespaces would be denied themselves. Verify with `hubble observe` or a real
+  HTTPRoute. (`allow-kube-apiserver`, `allow-dns` and `allow-webhook-ingress` do have end-to-end probes: `apiserver`, `dns`, `ac6`.)
+- `nodeny` shows that traffic is not restricted, and prints the endpoint enforcement and the identity label; it cannot prove from
+  traffic alone that the allow CCNPs were selecting the namespace at that moment (that is what the identity label evidence is for).
 - The probe server (`socat` in `probes.yaml`) drains the request line before it answers, so closing the socket does not
   cause RSTs that look like failures; a probe counts as reached for curl exit 0/35/52/56/60 (TCP connected) in both
   `probe_http` and the in-pod `flap` loop.

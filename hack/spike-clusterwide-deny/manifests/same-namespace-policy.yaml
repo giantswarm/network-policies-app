@@ -1,0 +1,24 @@
+# Same-namespace policy (PRD "Standard allows (label-selected)"): the ready-to-copy CiliumNetworkPolicy a namespace owner
+# applies so that pods of ONE namespace may talk to each other under the clusterwide deny. It is not a standard allow: Cilium
+# cannot express "own namespace" clusterwide. In a CNP, `[{}]` peers are scoped to the policy's own namespace.
+# enableDefaultDeny false/false keeps it purely additive: it does not lock down an opted-out namespace or a cluster without
+# the clusterwide deny (run-checklist.sh `nodeny` verifies this).
+# No metadata.namespace on purpose: the kit applies it per namespace with `kubectl -n <ns> apply -f`; copy it the same way.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ddn-spike-same-namespace
+  labels:
+    spike.giantswarm.io/owner: default-deny-netpol
+spec:
+  description: "Spike: same-namespace ingress and egress."
+  endpointSelector: {}
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    - fromEndpoints:
+        - {}
+  egress:
+    - toEndpoints:
+        - {}

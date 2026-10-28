@@ -55,18 +55,28 @@ LABEL_TIMEOUT="${SPIKE_LABEL_TIMEOUT:-60}"
 PRE_TIMEOUT="${SPIKE_PRE_TIMEOUT:-60}"
 LABEL_SETTLE="${SPIKE_LABEL_SETTLE:-40}"      # fixed wait after label changes whose effect cannot be polled (ac4, nodeny)
 LABEL_ROUNDS="${SPIKE_LABEL_ROUNDS:-3}"       # on/off rounds of ac5 in label mode
-# every timeout / window / round count is a positive integer (leading zeros stripped: no octal surprises, no `seq 1 0`)
-posint() { # NAME VALUE
-  case "$2" in ''|*[!0-9]*) echo "$1 must be a positive integer, got: '$2'" >&2; exit 2 ;; esac
-  if [ "${#2}" -gt 6 ] || [ "$((10#$2))" -lt 1 ]; then echo "$1 must be a positive integer (1-999999), got: '$2'" >&2; exit 2; fi
+# Numeric options: validated by validate_numerics, which the driver calls for `run` and `setup` only (never for cleanup, list or
+# --help, so a typo in an option can never stop a cleanup). Positive integers (1-999999) or, where 0 is meaningful, non-negative;
+# leading zeros are stripped (no octal surprises, no `seq 1 0`).
+numopt() { # NAME VALUE MIN
+  case "$2" in ''|*[!0-9]*) echo "$1 must be an integer >= $3, got: '$2'" >&2; exit 2 ;; esac
+  if [ "${#2}" -gt 6 ] || [ "$((10#$2))" -lt "$3" ]; then echo "$1 must be an integer >= $3 (max 999999), got: '$2'" >&2; exit 2; fi
 }
-posint SPIKE_SYNC_TIMEOUT "$SYNC_TIMEOUT"; SYNC_TIMEOUT=$((10#$SYNC_TIMEOUT))
-posint SPIKE_FLIP_TIMEOUT "$FLIP_TIMEOUT"; FLIP_TIMEOUT=$((10#$FLIP_TIMEOUT))
-posint SPIKE_FLAP_SECONDS "$FLAP_SECONDS"; FLAP_SECONDS=$((10#$FLAP_SECONDS))
-posint SPIKE_LABEL_TIMEOUT "$LABEL_TIMEOUT"; LABEL_TIMEOUT=$((10#$LABEL_TIMEOUT))
-posint SPIKE_PRE_TIMEOUT "$PRE_TIMEOUT"; PRE_TIMEOUT=$((10#$PRE_TIMEOUT))
-posint SPIKE_LABEL_SETTLE "$LABEL_SETTLE"; LABEL_SETTLE=$((10#$LABEL_SETTLE))
-posint SPIKE_LABEL_ROUNDS "$LABEL_ROUNDS"; LABEL_ROUNDS=$((10#$LABEL_ROUNDS))
+validate_numerics() {
+  numopt SPIKE_SYNC_TIMEOUT "$SYNC_TIMEOUT" 1; SYNC_TIMEOUT=$((10#$SYNC_TIMEOUT))
+  numopt SPIKE_FLIP_TIMEOUT "$FLIP_TIMEOUT" 1; FLIP_TIMEOUT=$((10#$FLIP_TIMEOUT))
+  numopt SPIKE_FLAP_SECONDS "$FLAP_SECONDS" 1; FLAP_SECONDS=$((10#$FLAP_SECONDS))
+  numopt SPIKE_LABEL_TIMEOUT "$LABEL_TIMEOUT" 1; LABEL_TIMEOUT=$((10#$LABEL_TIMEOUT))
+  numopt SPIKE_PRE_TIMEOUT "$PRE_TIMEOUT" 1; PRE_TIMEOUT=$((10#$PRE_TIMEOUT))
+  numopt SPIKE_LABEL_ROUNDS "$LABEL_ROUNDS" 1; LABEL_ROUNDS=$((10#$LABEL_ROUNDS))
+  numopt SPIKE_LOAD_PODS "$LOAD_PODS" 1; LOAD_PODS=$((10#$LOAD_PODS))
+  numopt SPIKE_DROP_WINDOW "$DROP_WINDOW" 1; DROP_WINDOW=$((10#$DROP_WINDOW))
+  numopt SPIKE_LABEL_SETTLE "$LABEL_SETTLE" 0; LABEL_SETTLE=$((10#$LABEL_SETTLE))
+  numopt SPIKE_SETTLE "$SETTLE" 0; SETTLE=$((10#$SETTLE))
+  numopt SPIKE_ANNOTATE_GAP "${SPIKE_ANNOTATE_GAP:-2}" 0; SPIKE_ANNOTATE_GAP=$((10#${SPIKE_ANNOTATE_GAP:-2}))
+  numopt SPIKE_HEALTH_WAIT "${SPIKE_HEALTH_WAIT:-20}" 0; SPIKE_HEALTH_WAIT=$((10#${SPIKE_HEALTH_WAIT:-20}))
+  if [ "$ALLOW_MODE" = label ]; then ALLOW_T="$LABEL_TIMEOUT"; else ALLOW_T="$SYNC_TIMEOUT"; fi   # re-derive from the normalized values
+}
 if [ "$ALLOW_MODE" = label ]; then
   ALLOW_T="$LABEL_TIMEOUT"; ALLOW_WORD=label
   # seconds after the bulk label request at which `bulk` samples: the first one is later than the longest label latency (~35 s)
@@ -751,7 +761,10 @@ ns_identity_has() { # ns pod allow...
     rc=1
     printf '%s\n' "$out" > "$tmp"
     # shellcheck disable=SC2086 # labs is a word list
-    if identity_carries_labels "$tmp" "$ns" $labs; then rm -f "$tmp"; ID_EVIDENCE="agent $ag"; return 0; fi
+    if identity_carries_labels "$tmp" "$ns" $labs; then rm -f "$tmp"; ID_EVIDENCE="agent $ag (${mode})"; return 0; fi
+    # a READABLE --endpoints list (identities of the live local endpoints) without the labels is final: the full list also holds
+    # stale identities of the same namespace (identity GC) that carried the labels earlier, and must not turn it into a pass
+    [ "$mode" = "identity list --endpoints" ] && break
   done
   rm -f "$tmp"
   if [ "$rc" = 1 ]; then P_DETAIL="agent $ag: no identity of $ns carries all of:$(printf ' %s' "$@")"; else P_DETAIL="agent $ag: identity list not readable"; fi
@@ -1625,7 +1638,9 @@ ac4_bpf_map_usage() {
       await_generated "$NS_ALL" "$a" || { result ac4 FAIL "standard allow $a was NEVER generated in $NS_ALL within ${SYNC_TIMEOUT}s"; return; }
     done
   fi
-  for i in $(seq 1 "$LOAD_PODS"); do
+  i=0
+  while [ "$i" -lt "$LOAD_PODS" ]; do
+    i=$((i + 1))
     cat <<EOF | K apply -f - >/dev/null
 apiVersion: v1
 kind: Pod
@@ -2128,7 +2143,7 @@ ac5_label_onoff() {
 ac_flap_label() {
   reset_state; begin
   local f_watch="$OUTDIR/flap-watch.txt" f_probe="$OUTDIR/flap-probe.txt" u0="$OUTDIR/flap-uids-before.txt" u1="$OUTDIR/flap-uids-after.txt"
-  local srv url end i wpid wpid2 ppid_ nd total failhttp faildns changed nadd uperr=0
+  local srv url end i wpid wpid2 ppid_ nd total failhttp faildns changed nadd nexp_add uperr=0
   mkdir -p "$OUTDIR"; : > "$f_watch"; : > "$f_probe"
   flap_uids() { { K get "$CCNP" -l "$OWNER_SEL" -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.uid} {.metadata.creationTimestamp}{"\n"}{end}' 2>/dev/null; cnp_uids "$NS_A"; } | sort; }
   label_allow_each "$NS_A" || { finish flap; return; }
@@ -2169,6 +2184,7 @@ ac_flap_label() {
   changed="$(diff "$u0" "$u1" | grep -c '^[<>]')"   # lines only in before (deleted/changed) or only in after (created/changed)
   # the watch must have seen the initial objects (ADDED before the mark): 5 label CCNPs + the Same-namespace policy at least
   nadd="$(awk '$2=="MARK"{m=1} !m&&$2=="ADDED"{n++} END{print n+0}' "$f_watch")"
+  nexp_add="$(grep -c . "$u0")"   # the objects actually listed before the updates (label CCNPs, deny, DNS allow if present, Same-namespace policy)
   ev "${i} rounds of unrelated Namespace updates; DELETED events for label CCNPs / $SAME_NS_CNP during the updates: ${nd}; objects whose uid/creationTimestamp changed or went missing: ${changed}; watch saw ${nadd} initial objects"
   ev "probe loop: ${total:-?} iterations, failed http: ${failhttp}, failed dns: ${faildns} (raw: $f_probe, $f_watch)"
   if [ "$ERR" = 1 ]; then
@@ -2176,10 +2192,13 @@ ac_flap_label() {
   elif [ -z "$total" ]; then
     ev "probe loop did not finish: $(head -c 200 "$f_probe" | tr '\n' ' ')"
     result flap INCONCLUSIVE "$EV"
+  elif [ ! -s "$u0" ] || [ ! -s "$u1" ]; then
+    # an empty snapshot is a failed kubectl read, not a deletion: the diff below would call everything deleted/created
+    result flap INCONCLUSIVE "$EV: the uid snapshot before or after the updates is empty (kubectl read failed): nothing can be concluded"
   elif [ "$nd" != 0 ] || [ "$changed" != 0 ]; then
     result flap FAIL "$EV: label mode must not delete or recreate anything on unrelated Namespace updates"
-  elif [ "${nadd:-0}" -lt $(( $(n_allows) + 1 )) ] || [ ! -s "$u0" ]; then
-    result flap INCONCLUSIVE "$EV: the watch did not see the initial objects (expected at least $(( $(n_allows) + 1 )) ADDED events), so 'nothing deleted' is not proven"
+  elif [ "${nadd:-0}" -lt "$nexp_add" ]; then
+    result flap INCONCLUSIVE "$EV: the watch saw ${nadd:-0} of the ${nexp_add} initial objects listed before the updates (ADDED events), so 'nothing deleted' is not proven"
   elif [ "$failhttp" != 0 ] || [ "$faildns" != 0 ]; then
     result flap FINDING "$EV: nothing was deleted or recreated, but the probe saw failures during unrelated Namespace updates (label changes recompute the namespace's identities): size them against the SLO of labeled namespaces; raw: $f_probe"
   else
@@ -2675,6 +2694,7 @@ case "$CMD" in
         fn_for "$a" >/dev/null || { echo "unknown function: $a$(other_mode_hint "$a") (see: $0 list)" >&2; exit 2; }
       done
     fi
+    validate_numerics
     trap on_exit EXIT
     trap 'on_signal INT 130' INT
     trap 'on_signal TERM 143' TERM

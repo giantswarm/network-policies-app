@@ -53,3 +53,20 @@ true
 {{- end -}}
 {{- $namespaces | uniq | toYaml -}}
 {{- end -}}
+
+{{/*
+Endpoint selector shared by the clusterwide deny and the clusterwide DNS allow, so they cannot drift.
+NotIn also selects namespaces that do not carry the label, so unlabeled namespaces are denied.
+The opt-out key is fixed: a namespace opts out with policy.giantswarm.io/default-deny: "false".
+reserved:health keeps the Cilium health endpoints out. They carry no namespace labels, so the NotIn selects them,
+and denying them cut cluster health to 1/6 in the spike.
+*/}}
+{{- define "network-policies-app.clusterWide.endpointSelector" -}}
+matchExpressions:
+  - key: io.cilium.k8s.namespace.labels.policy.giantswarm.io/default-deny
+    operator: NotIn
+    values:
+      - "false"
+  - key: reserved:health
+    operator: DoesNotExist
+{{- end -}}

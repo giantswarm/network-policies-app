@@ -1,0 +1,5 @@
+denyByDefault:
+  clusterWide:
+    enabled: true
+    allowDNS:
+      enabled: true

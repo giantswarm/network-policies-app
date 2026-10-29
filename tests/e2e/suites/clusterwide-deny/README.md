@@ -31,7 +31,7 @@ Negative results only count when a probe times out (packets dropped). Refusals
 and other errors fail loudly. Label changes take up to about a minute to show
 up, so label specs wait up to 2 minutes.
 
-Probe image notes (`gsoci.azurecr.io/giantswarm/alpine`, busybox 1.36): `wget`
+Probe image notes (`gsoci.azurecr.io/giantswarm/alpine:3.18.3`, busybox 1.36.1): `wget`
 does https through `ssl_client` and verifies certificates, so the API server
 and internet probes pass `--no-check-certificate`; `nslookup -timeout=2
 -retry=1` prints "connection timed out; no servers could be reached" on a

@@ -116,24 +116,29 @@ func TestClusterwideDeny(t *testing.T) {
 						ensureNamespace(ctx, wcClient, deniedNamespace, nil)
 						ensureProbePod(ctx, wcClient, deniedNamespace)
 
-						// The control proves the cluster has direct egress. Without
-						// it (e.g. egress only through a proxy) a blocked result
-						// would mean nothing, so skip rather than pass or fail.
+						// The control proves the cluster has direct egress. An opted-out
+						// namespace has no deny, so a timeout there is a failure. A
+						// refusal or unreachable network is what a proxy-only cluster
+						// gives: skip, since a blocked result would prove nothing.
 						By("reaching the internet from the opted-out namespace (control)")
 						var controlErr error
-						var control outcome
-						for attempt := 0; attempt < 3 && control != outcomeReachable; attempt++ {
-							control, controlErr = probeHTTP(ctx, wcClient, controlNamespace, internet)
-							if control != outcomeReachable {
-								time.Sleep(10 * time.Second)
+						Eventually(func() string {
+							result, err := probeHTTP(ctx, wcClient, controlNamespace, internet)
+							controlErr = err
+							if err != nil {
+								return "error"
 							}
-						}
-						if control != outcomeReachable {
-							Skip(fmt.Sprintf("the opted-out control namespace cannot reach %s: the cluster has no direct internet egress, so a blocked result would prove nothing (last result: %q, err: %v)", internet, control, controlErr))
+							return string(result)
+						}).
+							WithTimeout(time.Minute).
+							WithPolling(10*time.Second).
+							Should(Or(Equal(string(outcomeReachable)), Equal("error")), "the opted-out control timed out reaching %s: opted-out namespaces must have egress", internet)
+						if controlErr != nil {
+							Skip(fmt.Sprintf("the opted-out control cannot reach %s without timing out: the cluster has no direct internet egress, so a blocked result would prove nothing (%v)", internet, controlErr))
 						}
 
 						By("not reaching the internet from the unlabeled namespace")
-						expectReachability(ctx, wcClient, deniedNamespace, internet, false)
+						expectBlocked(ctx, wcClient, deniedNamespace, internet, optedOutControl, 3*time.Minute)
 					})
 
 					It("lets a probe follow a live opt-out label flip without restarting the pod", func() {
@@ -142,6 +147,8 @@ func TestClusterwideDeny(t *testing.T) {
 
 						ensureNamespace(ctx, wcClient, targetNamespace, map[string]string{optOutLabelKey: "false"})
 						target := ensureListenerPod(ctx, wcClient, targetNamespace)
+						ensureNamespace(ctx, wcClient, controlNamespace, map[string]string{optOutLabelKey: "false"})
+						ensureProbePod(ctx, wcClient, controlNamespace)
 						ensureNamespace(ctx, wcClient, deniedNamespace, nil)
 						ensureProbePod(ctx, wcClient, deniedNamespace)
 
@@ -152,7 +159,7 @@ func TestClusterwideDeny(t *testing.T) {
 						})
 
 						By("not reaching the target before the flip")
-						expectReachability(ctx, wcClient, deniedNamespace, target, false)
+						expectBlocked(ctx, wcClient, deniedNamespace, target, optedOutControl, 3*time.Minute)
 						before := getPodIdentity(ctx, wcClient, deniedNamespace, probePodName)
 
 						By("reaching the target after adding default-deny=false")
@@ -162,7 +169,7 @@ func TestClusterwideDeny(t *testing.T) {
 
 						By("not reaching the target after removing the label")
 						setNamespaceLabels(ctx, wcClient, deniedNamespace, nil, optOutLabelKey)
-						expectReachabilityWithin(ctx, wcClient, deniedNamespace, target, false, labelTimeout)
+						expectBlocked(ctx, wcClient, deniedNamespace, target, optedOutControl, labelTimeout)
 						Expect(getPodIdentity(ctx, wcClient, deniedNamespace, probePodName)).To(Equal(before), "the probe pod was replaced or restarted by the label change")
 					})
 
@@ -174,10 +181,15 @@ func TestClusterwideDeny(t *testing.T) {
 						// Same-namespace policy opens nothing beyond the namespace.
 						ensureNamespace(ctx, wcClient, targetNamespace, map[string]string{optOutLabelKey: "false"})
 						other := ensureListenerPod(ctx, wcClient, targetNamespace)
+						ensureNamespace(ctx, wcClient, controlNamespace, map[string]string{optOutLabelKey: "false"})
+						ensureProbePod(ctx, wcClient, controlNamespace)
 
 						ensureNamespace(ctx, wcClient, sameNamespaceNamespace, nil)
 						sameNamespaceTarget := ensureListenerPod(ctx, wcClient, sameNamespaceNamespace)
 						ensureProbePod(ctx, wcClient, sameNamespaceNamespace)
+						// No other namespace can reach a pod here, so the listener
+						// proves it is serving by probing itself over loopback.
+						selfControl := loopbackControl(sameNamespaceNamespace, listenerPodName)
 
 						DeferCleanup(func() {
 							deleteSameNamespacePolicy(ctx, wcClient, sameNamespaceNamespace)
@@ -186,29 +198,31 @@ func TestClusterwideDeny(t *testing.T) {
 						deleteSameNamespacePolicy(ctx, wcClient, sameNamespaceNamespace)
 
 						By("not reaching a pod in the same namespace without the policy")
-						expectReachability(ctx, wcClient, sameNamespaceNamespace, sameNamespaceTarget, false)
+						expectBlocked(ctx, wcClient, sameNamespaceNamespace, sameNamespaceTarget, selfControl, 3*time.Minute)
 
 						By("reaching a pod in the same namespace with the policy")
 						applySameNamespacePolicy(ctx, wcClient, sameNamespaceNamespace)
 						expectReachabilityWithin(ctx, wcClient, sameNamespaceNamespace, sameNamespaceTarget, true, labelTimeout)
 
 						By("still not reaching another namespace with the policy")
-						expectReachability(ctx, wcClient, sameNamespaceNamespace, other, false)
+						expectBlocked(ctx, wcClient, sameNamespaceNamespace, other, optedOutControl, 3*time.Minute)
 
 						By("not reaching a pod in the same namespace after deleting the policy")
 						deleteSameNamespacePolicy(ctx, wcClient, sameNamespaceNamespace)
-						expectReachabilityWithin(ctx, wcClient, sameNamespaceNamespace, sameNamespaceTarget, false, labelTimeout)
+						expectBlocked(ctx, wcClient, sameNamespaceNamespace, sameNamespaceTarget, selfControl, labelTimeout)
 					})
 
 					It("breaks DNS in an unlabeled namespace and restores it with allow-dns", func() {
 						ctx := state.GetContext()
 						wcClient := workloadClusterClient()
 
+						ensureNamespace(ctx, wcClient, controlNamespace, map[string]string{optOutLabelKey: "false"})
+						ensureProbePod(ctx, wcClient, controlNamespace)
 						ensureNamespace(ctx, wcClient, dnsNamespace, nil)
 						ensureProbePod(ctx, wcClient, dnsNamespace)
 
 						By("not resolving a cluster name without the label")
-						expectDNS(ctx, wcClient, dnsNamespace, false, 3*time.Minute)
+						expectDNSBlocked(ctx, wcClient, dnsNamespace, 3*time.Minute)
 
 						By("resolving it after adding allow-dns=true")
 						setNamespaceLabels(ctx, wcClient, dnsNamespace, map[string]string{allowDNSLabelKey: "true"})
@@ -216,7 +230,7 @@ func TestClusterwideDeny(t *testing.T) {
 
 						By("not resolving it after removing the label")
 						setNamespaceLabels(ctx, wcClient, dnsNamespace, nil, allowDNSLabelKey)
-						expectDNS(ctx, wcClient, dnsNamespace, false, labelTimeout)
+						expectDNSBlocked(ctx, wcClient, dnsNamespace, labelTimeout)
 					})
 
 					PIt("keeps DNS working in kube-system and giantswarm while allowDNS is off", func() {
@@ -233,11 +247,13 @@ func TestClusterwideDeny(t *testing.T) {
 						wcClient := workloadClusterClient()
 						apiServer := kubernetesServiceTarget(ctx, wcClient)
 
+						ensureNamespace(ctx, wcClient, controlNamespace, map[string]string{optOutLabelKey: "false"})
+						ensureProbePod(ctx, wcClient, controlNamespace)
 						ensureNamespace(ctx, wcClient, apiServerNamespace, nil)
 						ensureProbePod(ctx, wcClient, apiServerNamespace)
 
 						By("not reaching the API server without the label")
-						expectReachability(ctx, wcClient, apiServerNamespace, apiServer, false)
+						expectBlocked(ctx, wcClient, apiServerNamespace, apiServer, optedOutControl, 3*time.Minute)
 
 						By("getting an HTTPS answer after adding allow-kube-apiserver=true")
 						setNamespaceLabels(ctx, wcClient, apiServerNamespace, map[string]string{allowKubeAPIServerLabel: "true"})
@@ -245,20 +261,25 @@ func TestClusterwideDeny(t *testing.T) {
 
 						By("not reaching the API server after removing the label")
 						setNamespaceLabels(ctx, wcClient, apiServerNamespace, nil, allowKubeAPIServerLabel)
-						expectReachabilityWithin(ctx, wcClient, apiServerNamespace, apiServer, false, labelTimeout)
+						expectBlocked(ctx, wcClient, apiServerNamespace, apiServer, optedOutControl, labelTimeout)
 					})
 
-					It("applies all five allow labels set in one request", func() {
+					// Covers the DNS and API server allows. webhook-ingress,
+					// ingress-controller and metrics-scraping are labelled too but
+					// verified by their own pending specs.
+					It("keeps the DNS and API server allows working when all five allow labels are set in one request", func() {
 						ctx := state.GetContext()
 						wcClient := workloadClusterClient()
 						apiServer := kubernetesServiceTarget(ctx, wcClient)
 
+						ensureNamespace(ctx, wcClient, controlNamespace, map[string]string{optOutLabelKey: "false"})
+						ensureProbePod(ctx, wcClient, controlNamespace)
 						ensureNamespace(ctx, wcClient, allAllowsNamespace, nil)
 						ensureProbePod(ctx, wcClient, allAllowsNamespace)
 
 						By("starting with DNS and the API server blocked")
-						expectDNS(ctx, wcClient, allAllowsNamespace, false, 3*time.Minute)
-						expectReachability(ctx, wcClient, allAllowsNamespace, apiServer, false)
+						expectDNSBlocked(ctx, wcClient, allAllowsNamespace, 3*time.Minute)
+						expectBlocked(ctx, wcClient, allAllowsNamespace, apiServer, optedOutControl, 3*time.Minute)
 
 						By("setting all five allow labels in one update")
 						setNamespaceLabels(ctx, wcClient, allAllowsNamespace, map[string]string{
@@ -282,8 +303,8 @@ func TestClusterwideDeny(t *testing.T) {
 							result, err := probeHTTP(ctx, wcClient, allAllowsNamespace, apiServer)
 							return result == outcomeReachable, err
 						}
-						Consistently(dns).WithTimeout(60*time.Second).WithPolling(5*time.Second).Should(BeTrue(), "DNS stopped working with all five labels set")
-						Consistently(api).WithTimeout(60*time.Second).WithPolling(5*time.Second).Should(BeTrue(), "the API server became unreachable with all five labels set")
+						Consistently(dns).WithTimeout(30*time.Second).WithPolling(5*time.Second).Should(BeTrue(), "DNS stopped working with all five labels set")
+						Consistently(api).WithTimeout(30*time.Second).WithPolling(5*time.Second).Should(BeTrue(), "the API server became unreachable with all five labels set")
 					})
 
 					PIt("grants webhook ingress with allow-webhook-ingress", func() {

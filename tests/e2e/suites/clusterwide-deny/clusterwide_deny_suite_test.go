@@ -1,6 +1,7 @@
 package clusterwidedeny
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -119,22 +120,29 @@ func TestClusterwideDeny(t *testing.T) {
 						// The control proves the cluster has direct egress. An opted-out
 						// namespace has no deny, so a timeout there is a failure. A
 						// refusal or unreachable network is what a proxy-only cluster
-						// gives: skip, since a blocked result would prove nothing.
+						// gives: skip, since a blocked result would prove nothing. Any
+						// other error (exec, unknown output) is retried and fails the
+						// spec if it persists, so it can never turn into a skip.
 						By("reaching the internet from the opted-out namespace (control)")
-						var controlErr error
-						Eventually(func() string {
+						const noRoute = "no-route"
+						var noRouteErr error
+						Eventually(func() (string, error) {
+							noRouteErr = nil
 							result, err := probeHTTP(ctx, wcClient, controlNamespace, internet)
-							controlErr = err
-							if err != nil {
-								return "error"
+							if errors.Is(err, errNoRoute) {
+								noRouteErr = err
+								return noRoute, nil
 							}
-							return string(result)
+							if err != nil {
+								return "", err
+							}
+							return string(result), nil
 						}).
 							WithTimeout(time.Minute).
 							WithPolling(10*time.Second).
-							Should(Or(Equal(string(outcomeReachable)), Equal("error")), "the opted-out control timed out reaching %s: opted-out namespaces must have egress", internet)
-						if controlErr != nil {
-							Skip(fmt.Sprintf("the opted-out control cannot reach %s without timing out: the cluster has no direct internet egress, so a blocked result would prove nothing (%v)", internet, controlErr))
+							Should(Or(Equal(string(outcomeReachable)), Equal(noRoute)), "the opted-out control did not reach %s: opted-out namespaces must have egress", internet)
+						if noRouteErr != nil {
+							Skip(fmt.Sprintf("the opted-out control has no route to %s: the cluster has no direct internet egress, so a blocked result would prove nothing (%v)", internet, noRouteErr))
 						}
 
 						By("not reaching the internet from the unlabeled namespace")

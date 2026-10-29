@@ -2,6 +2,7 @@ package clusterwidedeny
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -63,6 +64,11 @@ const (
 	// execTimeout bounds one probe exec, connection wait included.
 	execTimeout = 30 * time.Second
 )
+
+// errNoRoute marks a probe that got a refusal or an unreachable network. It is
+// still an error for every reachability assertion; only the internet control
+// uses it to tell a cluster without direct egress from a broken probe.
+var errNoRoute = errors.New("connection refused or network unreachable")
 
 // outcome is the classified result of one probe.
 type outcome string
@@ -478,6 +484,13 @@ func probeHTTPFrom(ctx context.Context, wcClient *client.Client, fromNamespace, 
 	if !strings.Contains(lower, "server returned error") &&
 		(strings.Contains(lower, "wget: download timed out") || strings.Contains(lower, "connection timed out")) {
 		return outcomeTimeout, nil
+	}
+	// A refusal or an unreachable network means nothing dropped the packets:
+	// the target or the route is missing. Wrapped so a caller can tell it from
+	// an exec or classification failure.
+	if strings.Contains(lower, "connection refused") || strings.Contains(lower, "network unreachable") ||
+		strings.Contains(lower, "host unreachable") || strings.Contains(lower, "no route to host") {
+		return "", fmt.Errorf("%w: probe from %s to %s (not counted as blocked): exit=%s %q", errNoRoute, fromNamespace, target, code, detail)
 	}
 	return "", fmt.Errorf("probe from %s to %s failed without timing out (not counted as blocked): exit=%s %q", fromNamespace, target, code, detail)
 }

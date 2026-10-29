@@ -25,6 +25,18 @@ allowEgressToProxy:
   httpProxy: ""
   httpsProxy: ""
 
+allowEgressToUpstreamDNS:
+  enabled: false
+  namespaces:
+  - kube-system
+  cidrs: []
+
+azureWorkloadIdentityWebhook:
+  enabled: false
+
+hubbleRelay:
+  enabled: false
+
 # deprecated: use konnectivityAgent instead
 kamaji:
   enabled: false

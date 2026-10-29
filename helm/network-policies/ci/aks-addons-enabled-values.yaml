@@ -1,0 +1,8 @@
+allowEgressToUpstreamDNS:
+  enabled: true
+  cidrs:
+  - 168.63.129.16/32
+azureWorkloadIdentityWebhook:
+  enabled: true
+hubbleRelay:
+  enabled: true

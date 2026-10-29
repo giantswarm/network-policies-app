@@ -119,6 +119,32 @@ The same policy works on any provider whose metadata service answers on
 `169.254.169.254`, which includes AWS, Azure and GCP. Only the set of platform
 namespaces or workloads needing an exemption differs.
 
+### allowEgressToUpstreamDNS
+
+Allows egress on port 53 to the given CIDRs in the listed namespaces. Pods with
+`dnsPolicy: Default` resolve through the node's upstream resolvers instead of CoreDNS, and
+the default deny blocks them. On AKS, set `cidrs` to Azure DNS:
+
+```yaml
+allowEgressToUpstreamDNS:
+  enabled: true
+  cidrs:
+  - 168.63.129.16/32
+```
+
+### azureWorkloadIdentityWebhook
+
+Allows the AKS-managed workload identity webhook in `kube-system` to reach the API server,
+and the API server to call the webhook. On AKS those calls arrive through the Konnectivity
+agent, which runs with `hostNetwork` on BYO CNI clusters and as a regular pod otherwise, so
+both are allowed.
+
+### hubbleRelay
+
+Allows `hubble-relay` in `kube-system`, deployed by AKS with Advanced Container Networking
+Services observability, to reach the Hubble servers in the `hostNetwork` Cilium agents on
+port `4244`, and allows port-forwards to the relay on port `4245`.
+
 ## Compatibility
 
 This app has been tested to work with the following workload cluster release versions:

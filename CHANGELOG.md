@@ -11,6 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add the `clusterwide-deny` E2E test suite scaffold.
 
+## [0.5.0] - 2026-10-26
+
+### Added
+
+- Add `hubbleRelay` to allow the AKS ACNS `hubble-relay` through the default deny.
+
+### Changed
+
+- Move the chart to `helm/network-policies` to match its name, in preparation for devctl-generated CI.
+
+## [0.4.0] - 2026-10-19
+
+### Added
+
+- Add `allowEgressToUpstreamDNS` to allow pods with `dnsPolicy: Default` to reach upstream DNS resolvers.
+- Add `azureWorkloadIdentityWebhook` to allow the AKS workload identity webhook through the default deny.
+
 ## [0.3.2] - 2026-09-29
 
 ### Changed
@@ -100,7 +117,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - changed: `app.giantswarm.io` label group was changed to `application.giantswarm.io`
 
-[Unreleased]: https://github.com/giantswarm/network-policies-app/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/giantswarm/network-policies-app/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/giantswarm/network-policies-app/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/giantswarm/network-policies-app/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/giantswarm/network-policies-app/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/giantswarm/network-policies-app/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/giantswarm/network-policies-app/compare/v0.2.0...v0.3.0

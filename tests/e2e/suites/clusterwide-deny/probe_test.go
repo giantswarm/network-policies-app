@@ -16,6 +16,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	cr "sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -29,6 +31,23 @@ const (
 
 	// Namespace opt-out label, see the PRD. Provisional until agreed with Shield.
 	optOutLabelKey = "policy.giantswarm.io/default-deny"
+
+	// Namespaces carrying policy.giantswarm.io/allow-<x>: "true" are selected by
+	// the matching standard allow. There is no same-namespace label: that
+	// traffic is opened by a Same-namespace policy (see sameNamespacePolicy).
+	policyLabelPrefix        = "policy.giantswarm.io/"
+	allowDNSLabelKey         = "policy.giantswarm.io/allow-dns"
+	allowKubeAPIServerLabel  = "policy.giantswarm.io/allow-kube-apiserver"
+	allowWebhookIngressLabel = "policy.giantswarm.io/allow-webhook-ingress"
+	allowIngressCtrlLabel    = "policy.giantswarm.io/allow-ingress-controller"
+	allowMetricsLabel        = "policy.giantswarm.io/allow-metrics-scraping"
+
+	// labelTimeout bounds how long a label change may take to show up in
+	// connectivity (measured up to ~48s, see the PRD).
+	labelTimeout = 2 * time.Minute
+	// dnsName is resolved by the DNS probe; the trailing dot makes it fully
+	// qualified so no search domain is tried.
+	dnsName = "kubernetes.default.svc.cluster.local."
 
 	// ownerLabelKey marks namespaces created by this suite; only those are
 	// ever modified or deleted by it.
@@ -51,12 +70,30 @@ const (
 )
 
 // probeTarget is where a probe connects to: a host (name or IP) and a TCP port.
+// Scheme defaults to http and Path to /. HTTPSAnyAnswer is for targets that
+// only need to prove the network path: it skips certificate verification and
+// counts an HTTP error status (401, 403, 404...) as reachable, since any
+// response means the packets got through.
 type probeTarget struct {
-	Host string
-	Port int
+	Host           string
+	Port           int
+	Scheme         string
+	Path           string
+	HTTPSAnyAnswer bool
 }
 
 func (t probeTarget) String() string { return fmt.Sprintf("%s:%d", t.Host, t.Port) }
+
+func (t probeTarget) url() string {
+	scheme, path := t.Scheme, t.Path
+	if scheme == "" {
+		scheme = "http"
+	}
+	if path == "" {
+		path = "/"
+	}
+	return fmt.Sprintf("%s://%s:%d%s", scheme, t.Host, t.Port, path)
+}
 
 func workloadClusterClient() *client.Client {
 	wcClient, err := state.GetFramework().WC(state.GetCluster().Name)
@@ -66,7 +103,8 @@ func workloadClusterClient() *client.Client {
 
 // ensureNamespace creates the namespace with exactly the given labels (plus
 // the owner label), or reconciles an existing one suite-owned namespace to
-// them. The opt-out label is removed when it is not in labels. Namespaces not
+// them. Policy labels (policy.giantswarm.io/*) not in labels are removed.
+// Namespaces not
 // carrying the owner label, or already terminating, fail the test.
 func ensureNamespace(ctx context.Context, wcClient *client.Client, name string, labels map[string]string) {
 	want := map[string]string{ownerLabelKey: ownerLabelValue}
@@ -99,8 +137,10 @@ func ensureNamespace(ctx context.Context, wcClient *client.Client, name string, 
 		for key, value := range want {
 			existing.Labels[key] = value
 		}
-		if _, wanted := want[optOutLabelKey]; !wanted {
-			delete(existing.Labels, optOutLabelKey)
+		for key := range existing.Labels {
+			if _, wanted := want[key]; !wanted && strings.HasPrefix(key, policyLabelPrefix) {
+				delete(existing.Labels, key)
+			}
 		}
 		return wcClient.Update(ctx, existing)
 	}).
@@ -277,29 +317,52 @@ func podDiagnostics(ctx context.Context, wcClient *client.Client, pod *corev1.Po
 // A negative result must then hold for 30s, so a single dropped packet or a
 // policy that is not yet programmed cannot produce a pass.
 func expectReachability(ctx context.Context, wcClient *client.Client, fromNamespace string, target probeTarget, want bool) {
-	probe := func() (bool, error) {
+	expectReachabilityWithin(ctx, wcClient, fromNamespace, target, want, 3*time.Minute)
+}
+
+// expectReachabilityWithin is expectReachability with its own bound for how
+// long the expected state may take to appear.
+func expectReachabilityWithin(ctx context.Context, wcClient *client.Client, fromNamespace string, target probeTarget, want bool, within time.Duration) {
+	expectState(func() (bool, error) {
 		result, err := probeHTTP(ctx, wcClient, fromNamespace, target)
 		if err != nil {
 			return false, err
 		}
 		return result == outcomeReachable, nil
-	}
+	}, fmt.Sprintf("%s from %s", target, fromNamespace), want, within, 30*time.Second)
+}
 
-	description := "unreachable"
+// expectDNS asserts whether the probe in fromNamespace can resolve dnsName.
+// Same rules as expectReachability: only a DNS timeout counts as blocked.
+func expectDNS(ctx context.Context, wcClient *client.Client, fromNamespace string, want bool, within time.Duration) {
+	expectState(func() (bool, error) {
+		result, err := probeDNS(ctx, wcClient, fromNamespace)
+		if err != nil {
+			return false, err
+		}
+		return result == outcomeReachable, nil
+	}, fmt.Sprintf("DNS lookup of %s from %s", dnsName, fromNamespace), want, within, 30*time.Second)
+}
+
+// expectState polls probe until it returns want, within the given time. A
+// negative result must then hold for stable, see expectReachability. Probe
+// errors are retried while waiting, but fail a stability check.
+func expectState(probe func() (bool, error), what string, want bool, within, stable time.Duration) {
+	description := "blocked"
 	if want {
 		description = "reachable"
 	}
 
 	Eventually(probe).
-		WithTimeout(3*time.Minute).
-		WithPolling(10*time.Second).
-		Should(Equal(want), "expected %s to be %s from %s", target, description, fromNamespace)
+		WithTimeout(within).
+		WithPolling(5*time.Second).
+		Should(Equal(want), "expected %s to be %s", what, description)
 
 	if !want {
 		Consistently(probe).
-			WithTimeout(30*time.Second).
+			WithTimeout(stable).
 			WithPolling(5*time.Second).
-			Should(BeFalse(), "expected %s to stay unreachable from %s", target, fromNamespace)
+			Should(BeFalse(), "expected %s to stay blocked", what)
 	}
 }
 
@@ -310,8 +373,14 @@ func probeHTTP(ctx context.Context, wcClient *client.Client, fromNamespace strin
 	// The exit code of wget is captured on purpose: a denied connection is an
 	// expected outcome, not an exec failure. stderr distinguishes a timeout
 	// (silent drop) from a refusal (target down or reset).
-	script := fmt.Sprintf(`out=$(wget -q -T %d -O /dev/null http://%s:%d/ 2>&1); rc=$?; echo "$rc"; echo "$out"`,
-		probeTimeoutSeconds, target.Host, target.Port)
+	flags := ""
+	if target.HTTPSAnyAnswer {
+		// busybox wget verifies certificates through ssl_client; the cluster
+		// CA is not in the image and only the network path is under test.
+		flags = "--no-check-certificate "
+	}
+	script := fmt.Sprintf(`out=$(wget -q -T %d %s-O /dev/null %s 2>&1); rc=$?; echo "$rc"; echo "$out"`,
+		probeTimeoutSeconds, flags, target.url())
 
 	stdout, stderr, err := wcClient.ExecInPod(ctx, probePodName, fromNamespace, probeContainerName, []string{"sh", "-c", script})
 	if err != nil {
@@ -326,15 +395,152 @@ func probeHTTP(ctx context.Context, wcClient *client.Client, fromNamespace strin
 		return outcomeReachable, nil
 	}
 
+	lower := strings.ToLower(detail)
+	// An HTTP error status is an answer from the target, so for targets that
+	// only prove the network path it counts as reachable.
+	if target.HTTPSAnyAnswer && strings.Contains(lower, "server returned error") {
+		return outcomeReachable, nil
+	}
+
 	// Only busybox wget's own timeout messages count: "wget: download timed
 	// out" and the kernel's "Connection timed out". "server returned error"
 	// (e.g. an HTTP 504 Gateway Timeout) and refusals are errors.
-	lower := strings.ToLower(detail)
 	if !strings.Contains(lower, "server returned error") &&
 		(strings.Contains(lower, "wget: download timed out") || strings.Contains(lower, "connection timed out")) {
 		return outcomeTimeout, nil
 	}
 	return "", fmt.Errorf("probe from %s to %s failed without timing out (not counted as blocked): exit=%s %q", fromNamespace, target, code, detail)
+}
+
+// probeDNS resolves dnsName from the probe pod in fromNamespace using busybox
+// nslookup against the pod's resolver and classifies the result as resolved
+// (outcomeReachable) or timeout. NXDOMAIN, SERVFAIL, REFUSED and exec
+// failures return an error: only a timeout is what a deny policy produces.
+func probeDNS(ctx context.Context, wcClient *client.Client, fromNamespace string) (outcome, error) {
+	// nslookup exits 1 on a timeout as well as on NXDOMAIN, so the exit code
+	// is captured and the output decides. -retry=1 keeps it to one 2s try.
+	script := fmt.Sprintf(`out=$(nslookup -timeout=2 -retry=1 %s 2>&1); rc=$?; echo "$rc"; echo "$out"`, dnsName)
+
+	stdout, stderr, err := wcClient.ExecInPod(ctx, probePodName, fromNamespace, probeContainerName, []string{"sh", "-c", script})
+	if err != nil {
+		return "", fmt.Errorf("failed to run DNS probe in %s/%s: %w (stderr: %q)", fromNamespace, probePodName, err, stderr)
+	}
+
+	code, detail, _ := strings.Cut(strings.TrimSpace(stdout), "\n")
+	detail = strings.TrimSpace(detail)
+	logger.Log("DNS probe from %s for %s: exit=%s %s", fromNamespace, dnsName, code, strings.ReplaceAll(detail, "\n", " | "))
+
+	lower := strings.ToLower(detail)
+	if code == "0" && strings.Contains(lower, "name:") && strings.Contains(lower, "address") {
+		return outcomeReachable, nil
+	}
+
+	// busybox prints ";; connection timed out; no servers could be reached"
+	// when the resolver never answers. Refused or unreachable servers print
+	// other messages and are not counted.
+	if strings.Contains(lower, "connection timed out; no servers could be reached") &&
+		!strings.Contains(lower, "refused") && !strings.Contains(lower, "unreachable") {
+		return outcomeTimeout, nil
+	}
+	return "", fmt.Errorf("DNS probe from %s for %s failed without timing out (not counted as blocked): exit=%s %q", fromNamespace, dnsName, code, detail)
+}
+
+// setNamespaceLabels sets and removes labels on a suite-owned namespace in a
+// single Update, so every change lands in one request.
+func setNamespaceLabels(ctx context.Context, wcClient *client.Client, name string, set map[string]string, remove ...string) {
+	// Retry on conflicts: Kyverno and other controllers also write namespaces.
+	Eventually(func() error {
+		namespace := &corev1.Namespace{}
+		if err := wcClient.Get(ctx, cr.ObjectKey{Name: name}, namespace); err != nil {
+			return err
+		}
+		if namespace.Labels[ownerLabelKey] != ownerLabelValue {
+			return StopTrying(fmt.Sprintf("namespace %s is not owned by this suite", name))
+		}
+		if namespace.Labels == nil {
+			namespace.Labels = map[string]string{}
+		}
+		for key, value := range set {
+			namespace.Labels[key] = value
+		}
+		for _, key := range remove {
+			delete(namespace.Labels, key)
+		}
+		return wcClient.Update(ctx, namespace)
+	}).
+		WithTimeout(30 * time.Second).
+		WithPolling(time.Second).
+		Should(Succeed())
+}
+
+// podIdentity identifies one running incarnation of a pod: a different UID or
+// a higher restart count means the pod was replaced or restarted.
+type podIdentity struct {
+	UID      types.UID
+	Restarts int32
+}
+
+func getPodIdentity(ctx context.Context, wcClient *client.Client, namespace, name string) podIdentity {
+	pod := &corev1.Pod{}
+	Expect(wcClient.Get(ctx, cr.ObjectKey{Namespace: namespace, Name: name}, pod)).To(Succeed())
+
+	identity := podIdentity{UID: pod.UID}
+	for _, cs := range pod.Status.ContainerStatuses {
+		identity.Restarts += cs.RestartCount
+	}
+	return identity
+}
+
+const sameNamespacePolicyName = "cwd-e2e-same-namespace"
+
+// sameNamespacePolicy is the Same-namespace policy a namespace owner applies
+// to open traffic between the pods of their own namespace under the
+// clusterwide deny. Cilium cannot express "own namespace" clusterwide, so this
+// is a namespaced CiliumNetworkPolicy, not a standard allow. Purely additive:
+// enableDefaultDeny false/false keeps it from locking anything down itself.
+func sameNamespacePolicy(namespace string) *unstructured.Unstructured {
+	policy := &unstructured.Unstructured{Object: map[string]any{
+		"spec": map[string]any{
+			"endpointSelector":  map[string]any{},
+			"enableDefaultDeny": map[string]any{"ingress": false, "egress": false},
+			"ingress":           []any{map[string]any{"fromEndpoints": []any{map[string]any{}}}},
+			"egress":            []any{map[string]any{"toEndpoints": []any{map[string]any{}}}},
+		},
+	}}
+	policy.SetAPIVersion("cilium.io/v2")
+	policy.SetKind("CiliumNetworkPolicy")
+	policy.SetName(sameNamespacePolicyName)
+	policy.SetNamespace(namespace)
+	policy.SetLabels(map[string]string{ownerLabelKey: ownerLabelValue})
+	return policy
+}
+
+func applySameNamespacePolicy(ctx context.Context, wcClient *client.Client, namespace string) {
+	err := wcClient.Create(ctx, sameNamespacePolicy(namespace))
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred())
+	}
+}
+
+func deleteSameNamespacePolicy(ctx context.Context, wcClient *client.Client, namespace string) {
+	Expect(cr.IgnoreNotFound(wcClient.Delete(ctx, sameNamespacePolicy(namespace)))).To(Succeed())
+}
+
+// kubernetesServiceTarget returns the API server as reached from pods: the
+// ClusterIP and port of the default/kubernetes Service, /version over HTTPS.
+func kubernetesServiceTarget(ctx context.Context, wcClient *client.Client) probeTarget {
+	service := &corev1.Service{}
+	Expect(wcClient.Get(ctx, cr.ObjectKey{Namespace: "default", Name: "kubernetes"}, service)).To(Succeed())
+	Expect(service.Spec.ClusterIP).NotTo(BeEmpty())
+	Expect(service.Spec.Ports).NotTo(BeEmpty())
+
+	return probeTarget{
+		Host:           service.Spec.ClusterIP,
+		Port:           int(service.Spec.Ports[0].Port),
+		Scheme:         "https",
+		Path:           "/version",
+		HTTPSAnyAnswer: true,
+	}
 }
 
 // deleteNamespaces removes the suite's namespaces, ignoring ones already gone

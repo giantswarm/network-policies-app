@@ -1,0 +1,103 @@
+suite: clusterwide DNS allow
+templates:
+  - templates/cilium/clusterwide-deny-all.yaml
+  - templates/cilium/clusterwide-allow-dns.yaml
+  - templates/cilium/allow-dns.yaml
+tests:
+  - it: renders no DNS allow when allowDNS is enabled without clusterWide
+    set:
+      denyByDefault.clusterWide.allowDNS.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/cilium/clusterwide-allow-dns.yaml
+
+  - it: renders no DNS allow when clusterWide is enabled without allowDNS
+    set:
+      denyByDefault.clusterWide.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/cilium/clusterwide-allow-dns.yaml
+
+  - it: renders an additive L4 DNS allow with the same selector as the deny
+    set:
+      denyByDefault.clusterWide.enabled: true
+      denyByDefault.clusterWide.allowDNS.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+        template: templates/cilium/clusterwide-allow-dns.yaml
+      - isKind:
+          of: CiliumClusterwideNetworkPolicy
+        template: templates/cilium/clusterwide-allow-dns.yaml
+      - equal:
+          path: metadata.name
+          value: allow-dns-all-namespaces
+        template: templates/cilium/clusterwide-allow-dns.yaml
+      - equal:
+          path: spec.endpointSelector.matchExpressions
+          value:
+            - key: io.cilium.k8s.namespace.labels.policy.giantswarm.io/default-deny
+              operator: NotIn
+              values:
+                - "false"
+            - key: reserved:health
+              operator: DoesNotExist
+        template: templates/cilium/clusterwide-allow-dns.yaml
+      - equal:
+          path: spec.enableDefaultDeny
+          value:
+            ingress: false
+            egress: false
+        template: templates/cilium/clusterwide-allow-dns.yaml
+      - equal:
+          path: spec.egress[0].toPorts[0].ports
+          value:
+            - port: "1053"
+              protocol: UDP
+            - port: "1053"
+              protocol: TCP
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+        template: templates/cilium/clusterwide-allow-dns.yaml
+      - lengthEqual:
+          path: spec.egress[0].toEndpoints
+          count: 3
+        template: templates/cilium/clusterwide-allow-dns.yaml
+
+  - it: never renders an L7 dns rule, even with allowEgressToProxy enabled
+    set:
+      denyByDefault.clusterWide.enabled: true
+      denyByDefault.clusterWide.allowDNS.enabled: true
+      allowEgressToProxy.enabled: true
+    asserts:
+      - notExists:
+          path: spec.egress[0].toPorts[0].rules
+        template: templates/cilium/clusterwide-allow-dns.yaml
+
+  - it: leaves the per-namespace allowEgressToDNS policy unchanged with clusterWide on
+    set:
+      denyByDefault.clusterWide.enabled: true
+      allowEgressToDNS.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 2
+        template: templates/cilium/allow-dns.yaml
+      - equal:
+          path: metadata.name
+          value: default-allow-dns
+        template: templates/cilium/allow-dns.yaml
+        documentIndex: 0
+      - equal:
+          path: metadata.namespace
+          value: kube-system
+        template: templates/cilium/allow-dns.yaml
+        documentIndex: 0
+      - equal:
+          path: spec.endpointSelector
+          value: {}
+        template: templates/cilium/allow-dns.yaml
+        documentIndex: 0

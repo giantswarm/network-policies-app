@@ -1,0 +1,15 @@
+{{- if .Values.denyByDefault.clusterWide.enabled }}
+# Denies all traffic of every namespace without the opt-out label, kube-system and giantswarm included.
+# There are no namespace exceptions here. See the selector helper for what it selects and why.
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: default-deny-all-namespaces
+spec:
+  endpointSelector:
+    {{- include "network-policies-app.clusterWide.endpointSelector" . | nindent 4 }}
+  ingress:
+    - {}
+  egress:
+    - {}
+{{- end }}

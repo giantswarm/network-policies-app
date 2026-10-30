@@ -11,4 +11,23 @@
 
 {{ template "chart.requirementsSection" . }}
 
+## Clusterwide default deny
+
+By default the app creates a `default-deny-all` policy in each namespace listed in `denyByDefault.namespaces`.
+Setting `denyByDefault.clusterWide.enabled: true` replaces those with one `CiliumClusterwideNetworkPolicy`,
+`default-deny-all-namespaces`, that denies all traffic of every namespace, `kube-system` and `giantswarm` included.
+The switch is off by default and is opted into per cluster. It is independent of `denyByDefault.enabled`.
+
+- **Namespace opt-out.** A namespace carrying the label `policy.giantswarm.io/default-deny: "false"` is not covered.
+  Namespaces without the label are denied. Do not label `kube-system` or `giantswarm` with it.
+- **Clusterwide DNS allow.** `denyByDefault.clusterWide.allowDNS.enabled: true` adds `allow-dns-all-namespaces`,
+  an L4-only egress allow to CoreDNS, node-local DNS cache and kube-dns for every covered namespace.
+  Enable it in the same change as `clusterWide.enabled`, or give every customer namespace a DNS allow first.
+  Otherwise DNS breaks the moment the deny lands.
+- **Rollback.** First opt the affected namespace out with the label above. If that is not enough,
+  set `denyByDefault.clusterWide.enabled: false`, which restores the per-namespace policies
+  as long as `denyByDefault.enabled` is still true.
+
+Standard allows and allow labels come in a later change (giantswarm/roadmap#4376).
+
 {{ template "chart.valuesSection" . }}

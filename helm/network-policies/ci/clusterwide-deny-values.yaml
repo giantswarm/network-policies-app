@@ -1,0 +1,3 @@
+denyByDefault:
+  clusterWide:
+    enabled: true

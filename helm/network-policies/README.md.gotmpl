@@ -25,7 +25,8 @@ The switch is off by default and is opted into per cluster. It is independent of
   Enable it in the same change as `clusterWide.enabled`, or give every customer namespace a DNS allow first.
   Otherwise DNS breaks the moment the deny lands.
 - **Rollback.** First opt the affected namespace out with the label above. If that is not enough,
-  set `denyByDefault.clusterWide.enabled: false`, which restores the per-namespace policies.
+  set `denyByDefault.clusterWide.enabled: false`, which restores the per-namespace policies
+  as long as `denyByDefault.enabled` is still true.
 
 Standard allows and allow labels come in a later change (giantswarm/roadmap#4376).
 

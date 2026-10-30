@@ -74,6 +74,12 @@ tests:
       denyByDefault.clusterWide.allowDNS.enabled: true
       allowEgressToProxy.enabled: true
     asserts:
+      - hasDocuments:
+          count: 1
+        template: templates/cilium/clusterwide-allow-dns.yaml
+      - isKind:
+          of: CiliumClusterwideNetworkPolicy
+        template: templates/cilium/clusterwide-allow-dns.yaml
       - notExists:
           path: spec.egress[0].toPorts[0].rules
         template: templates/cilium/clusterwide-allow-dns.yaml

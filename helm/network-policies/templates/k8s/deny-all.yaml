@@ -1,4 +1,4 @@
-{{- if .Values.denyByDefault.enabled }}
+{{- if and .Values.denyByDefault.enabled (not .Values.denyByDefault.clusterWide.enabled) }}
 {{- range .Values.denyByDefault.namespaces }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

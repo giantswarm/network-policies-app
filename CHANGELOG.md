@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Add the `clusterwide-deny` E2E test suite scaffold.
+- Add `denyByDefault.clusterWide` to replace the per-namespace default deny with a single clusterwide policy, with the namespace opt-out label `policy.giantswarm.io/default-deny: "false"`.
+- Add `denyByDefault.clusterWide.allowDNS` to allow DNS egress for every namespace the clusterwide deny covers.
+- Add the `clusterwide-deny` E2E test suite for the clusterwide default deny, its opt-out label, the Same-namespace policy and the standard allow labels.
 
 ## [0.5.0] - 2026-10-26
 

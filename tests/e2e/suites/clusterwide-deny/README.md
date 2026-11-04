@@ -8,14 +8,13 @@ pods, not on rendered manifests.
 
 ## Status
 
-Implemented, red until the chart features land. The values key
-`denyByDefault.clusterWide.enabled` does not exist in the chart yet; it arrives
-with giantswarm/roadmap#4340 (the label-selected standard allows come with
-#4376). Until then the chart's `values.schema.json` rejects it
-(additionalProperties is false), so the HelmRelease install fails and the
-suite is expected to fail fast: the specs run in an `Ordered` container, so
-everything after the install spec is skipped. Do not wire it into a required
-check before #4340 lands.
+Implemented, partly red until giantswarm/roadmap#4376 lands. The chart has
+`denyByDefault.clusterWide.enabled` since giantswarm/roadmap#4340, so the
+install and the specs that only need the clusterwide deny are expected to pass.
+The allow-label specs (DNS with `allow-dns`, `allow-kube-apiserver`, all five
+labels) need the label-selected standard allows from #4376 and fail until then.
+The specs run in an `Ordered` container, so after the first failure the rest
+are skipped. Do not wire it into a required check before #4376 lands.
 
 Implemented specs: cross-namespace deny, internet blocked (skipped when the
 opted-out control cannot reach the internet itself), live opt-out label flip

@@ -10,6 +10,13 @@ denyByDefault:
   namespaces:
   - kube-system
   - giantswarm
+  # Replaces the per-namespace default-deny-all policies with one clusterwide policy that covers every namespace.
+  # Namespaces opt out with the label policy.giantswarm.io/default-deny: "false".
+  clusterWide:
+    enabled: false
+    # Clusterwide DNS egress allow for every namespace the clusterwide deny covers. Needs clusterWide.enabled.
+    allowDNS:
+      enabled: false
 
 allowEgressToDNS:
   enabled: false

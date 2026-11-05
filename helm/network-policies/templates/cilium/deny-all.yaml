@@ -1,4 +1,4 @@
-{{- if .Values.denyByDefault.enabled }}
+{{- if and .Values.denyByDefault.enabled (not .Values.denyByDefault.clusterWide.enabled) }}
 {{- range .Values.denyByDefault.namespaces }}
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy

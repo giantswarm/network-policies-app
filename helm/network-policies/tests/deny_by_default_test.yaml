@@ -1,0 +1,106 @@
+suite: default deny
+templates:
+  - templates/cilium/deny-all.yaml
+  - templates/k8s/deny-all.yaml
+  - templates/cilium/clusterwide-deny-all.yaml
+  - templates/cilium/clusterwide-allow-dns.yaml
+tests:
+  - it: renders per-namespace deny-all by default and no clusterwide policies
+    asserts:
+      - hasDocuments:
+          count: 2
+        template: templates/cilium/deny-all.yaml
+      - hasDocuments:
+          count: 2
+        template: templates/k8s/deny-all.yaml
+      - isKind:
+          of: CiliumNetworkPolicy
+        template: templates/cilium/deny-all.yaml
+        documentIndex: 0
+      - equal:
+          path: metadata.namespace
+          value: kube-system
+        template: templates/cilium/deny-all.yaml
+        documentIndex: 0
+      - equal:
+          path: metadata.namespace
+          value: giantswarm
+        template: templates/k8s/deny-all.yaml
+        documentIndex: 1
+      - isKind:
+          of: NetworkPolicy
+        template: templates/k8s/deny-all.yaml
+        documentIndex: 0
+      - hasDocuments:
+          count: 0
+        template: templates/cilium/clusterwide-deny-all.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/cilium/clusterwide-allow-dns.yaml
+
+  - it: renders nothing when denyByDefault is disabled
+    set:
+      denyByDefault.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/cilium/deny-all.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/k8s/deny-all.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/cilium/clusterwide-deny-all.yaml
+
+  - it: renders the clusterwide deny and drops the per-namespace deny-all when clusterWide is enabled
+    set:
+      denyByDefault.clusterWide.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+        template: templates/cilium/clusterwide-deny-all.yaml
+      - isKind:
+          of: CiliumClusterwideNetworkPolicy
+        template: templates/cilium/clusterwide-deny-all.yaml
+      - equal:
+          path: metadata.name
+          value: default-deny-all-namespaces
+        template: templates/cilium/clusterwide-deny-all.yaml
+      - equal:
+          path: spec.endpointSelector.matchExpressions
+          value:
+            - key: io.cilium.k8s.namespace.labels.policy.giantswarm.io/default-deny
+              operator: NotIn
+              values:
+                - "false"
+            - key: reserved:health
+              operator: DoesNotExist
+        template: templates/cilium/clusterwide-deny-all.yaml
+      - equal:
+          path: spec.ingress
+          value:
+            - {}
+        template: templates/cilium/clusterwide-deny-all.yaml
+      - equal:
+          path: spec.egress
+          value:
+            - {}
+        template: templates/cilium/clusterwide-deny-all.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/cilium/deny-all.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/k8s/deny-all.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/cilium/clusterwide-allow-dns.yaml
+
+  - it: renders the clusterwide deny independent of denyByDefault.enabled
+    set:
+      denyByDefault.enabled: false
+      denyByDefault.clusterWide.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+        template: templates/cilium/clusterwide-deny-all.yaml

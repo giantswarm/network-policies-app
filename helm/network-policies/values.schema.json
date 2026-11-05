@@ -101,6 +101,24 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
+                "clusterWide": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "allowDNS": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "enabled": {
+                                    "type": "boolean"
+                                }
+                            }
+                        },
+                        "enabled": {
+                            "type": "boolean"
+                        }
+                    }
+                },
                 "enabled": {
                     "type": "boolean"
                 },

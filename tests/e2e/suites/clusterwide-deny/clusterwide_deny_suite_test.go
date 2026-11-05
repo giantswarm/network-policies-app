@@ -79,6 +79,15 @@ func TestClusterwideDeny(t *testing.T) {
 						Should(BeTrue())
 				})
 
+				// The deny is switched on only now, on the running cluster: set
+				// at creation it stops default apps such as Kyverno from
+				// installing (see enableClusterWideDeny).
+				It("turns on the clusterwide deny through the cluster values", func() {
+					ctx := state.GetContext()
+					enableClusterWideDeny(ctx)
+					expectClusterWideDenyPolicy(ctx)
+				})
+
 				Describe("connectivity", func() {
 					It("blocks a probe in an unlabeled namespace from reaching another namespace", func() {
 						ctx := state.GetContext()

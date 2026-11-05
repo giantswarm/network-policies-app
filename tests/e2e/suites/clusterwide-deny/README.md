@@ -16,6 +16,14 @@ labels) need the label-selected standard allows from #4376 and fail until then.
 The specs run in an `Ordered` container, so after the first failure the rest
 are skipped. Do not wire it into a required check before #4376 lands.
 
+The cluster is created with the clusterwide deny off. A deny from the cluster's
+first minute stops Kyverno from installing (its jobs cannot reach the API
+server), so the default apps never become ready and no spec runs. The first spec
+after the install turns the deny on for the running cluster through the
+network-policies values in the cluster app's user config
+(`global.apps.networkPolicies.values`), the way a customer would, and waits for
+`default-deny-all-namespaces` to exist.
+
 Implemented specs: cross-namespace deny, internet blocked (skipped when the
 opted-out control cannot reach the internet itself), live opt-out label flip
 without a pod restart, Same-namespace policy, DNS with `allow-dns`,

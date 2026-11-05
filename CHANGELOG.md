@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- CI: architect orb 10.16.7, which pushes the chart to the git app catalogs with the architect GitHub App instead of the `catalogbot` account (giantswarm/giantswarm#34786).
 - Move the chart to `helm/network-policies` to match its name, in preparation for devctl-generated CI.
 
 ## [0.4.0] - 2026-10-19

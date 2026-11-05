@@ -144,22 +144,33 @@ func networkPoliciesReleaseSettled(ctx context.Context) error {
 	return fmt.Errorf("HelmRelease %s has no Ready condition", key)
 }
 
+// denyEnabled records that the suite turned the deny on, so teardown only
+// turns it off when there is something to undo.
+var denyEnabled bool
+
 // disableClusterWideDeny turns the deny off again before the cluster is torn
 // down, so uninstall hooks in denied namespaces can reach the API server.
-// Best effort: it only logs, since the cluster is deleted either way.
+// Best effort and bounded to 10 minutes: it only logs, since the cluster is
+// deleted either way.
 func disableClusterWideDeny(ctx context.Context) {
+	if !denyEnabled {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+
 	if err := setClusterWideDeny(ctx, false); err != nil {
 		logger.Log("Could not turn the clusterwide deny off before teardown: %s", err)
 		return
 	}
-	deadline := time.Now().Add(10 * time.Minute)
-	for time.Now().Before(deadline) {
-		exists, err := clusterWideDenyPolicyExists(ctx)
-		if err == nil && !exists {
-			logger.Log("The clusterwide deny is off")
-			return
-		}
-		time.Sleep(15 * time.Second)
+	// A Gomega that only logs, so a timeout here never fails the suite.
+	g := NewGomega(func(message string, _ ...int) { logger.Log("%s", message) })
+	gone := g.Eventually(ctx, func() (bool, error) { return clusterWideDenyPolicyExists(ctx) }).
+		WithPolling(15 * time.Second).
+		Should(BeFalse())
+	if !gone {
+		logger.Log("The CiliumClusterwideNetworkPolicy %s was still there when the teardown budget ran out; tearing down anyway", clusterWideDenyPolicyName)
+		return
 	}
-	logger.Log("The CiliumClusterwideNetworkPolicy %s was still there 10 minutes after turning the deny off; tearing down anyway", clusterWideDenyPolicyName)
+	logger.Log("The clusterwide deny is off")
 }

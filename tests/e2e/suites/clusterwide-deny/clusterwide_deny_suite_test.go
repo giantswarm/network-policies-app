@@ -87,6 +87,7 @@ func TestClusterwideDeny(t *testing.T) {
 					BeforeAll(func() {
 						ctx := state.GetContext()
 						Expect(setClusterWideDeny(ctx, true)).To(Succeed())
+						denyEnabled = true
 						expectClusterWideDenyPolicy(ctx)
 					})
 
@@ -340,7 +341,8 @@ func TestClusterwideDeny(t *testing.T) {
 
 					PIt("matches today's behaviour when the clusterwide deny is disabled (per-namespace default-deny-all in kube-system/giantswarm, customer namespaces unaffected)", func() {
 						// The cluster now starts with the deny off, so this could run
-						// before the deny is turned on.
+						// in a container before "connectivity", whose BeforeAll turns
+						// the deny on.
 					})
 
 					PIt("keeps Giant Swarm components healthy and Cilium reporting healthy with the clusterwide deny on", func() {

@@ -48,7 +48,7 @@ dropped DNS query.
 
 ## Layout
 
-- `clusterwide_deny_suite_test.go` the suite and one `Describe` per behaviour.
+- `clusterwide_deny_suite_test.go` the suite: the install check, then the connectivity specs.
 - `probe_test.go` reusable helpers: namespaces and label changes,
   probe and listener pods, HTTP and DNS reachability assertions, the
   Same-namespace policy.

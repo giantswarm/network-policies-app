@@ -70,3 +70,43 @@ matchExpressions:
   - key: reserved:health
     operator: DoesNotExist
 {{- end -}}
+
+{{/*
+Egress to the cluster DNS, L4 only. Shared by the clusterwide DNS allow and the allow-dns standard allow, so they
+cannot drift. Never the rules.dns block of allow-dns.yaml: an L4 DNS allow widens customer FQDN allow-lists, and an L7
+rule here would put the DNS of every selected namespace through the proxy (enableDefaultDeny false does not cover L7).
+*/}}
+{{- define "network-policies-app.dnsEgress" -}}
+- toEndpoints:
+    - matchLabels:
+        io.kubernetes.pod.namespace: kube-system
+        k8s-app: coredns
+    - matchLabels:
+        io.kubernetes.pod.namespace: kube-system
+        k8s-app: k8s-dns-node-cache
+    - matchLabels:
+        io.kubernetes.pod.namespace: kube-system
+        k8s-app: kube-dns # Used in AKS
+  toPorts:
+    - ports:
+        - port: "1053"
+          protocol: UDP
+        - port: "1053"
+          protocol: TCP
+        - port: "53"
+          protocol: UDP
+        - port: "53"
+          protocol: TCP
+{{- end -}}
+
+{{/*
+Endpoint selector of a standard allow: the namespaces carrying its allow label policy.giantswarm.io/allow-<x>: "true".
+Health endpoints carry no namespace labels, so no reserved:health exclusion is needed.
+*/}}
+{{- define "network-policies-app.standardAllow.endpointSelector" -}}
+matchExpressions:
+  - key: io.cilium.k8s.namespace.labels.policy.giantswarm.io/allow-{{ . }}
+    operator: In
+    values:
+      - "true"
+{{- end -}}

@@ -238,6 +238,34 @@
         "serviceType": {
             "type": "string"
         },
+        "standardAllows": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "webhookIngress": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "fromEntities": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": [
+                                    "all",
+                                    "cluster",
+                                    "host",
+                                    "remote-node",
+                                    "kube-apiserver",
+                                    "world",
+                                    "ingress"
+                                ]
+                            },
+                            "minItems": 1
+                        }
+                    }
+                }
+            }
+        },
         "subscriptionID": {
             "type": "string"
         }

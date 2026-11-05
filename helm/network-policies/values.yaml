@@ -18,6 +18,17 @@ denyByDefault:
     allowDNS:
       enabled: false
 
+# Standard allows: static clusterwide allows, always rendered, each covering the namespaces labelled
+# policy.giantswarm.io/allow-<x>: "true" (dns, kube-apiserver, webhook-ingress, ingress-controller, metrics-scraping).
+# Purely additive: they change nothing without a deny.
+standardAllows:
+  webhookIngress:
+    # Cilium entities the API server's webhook calls come from. AKS needs [cluster]: there the kube-apiserver entity
+    # does not match ingress, because control-plane traffic is tunnelled through the worker nodes.
+    fromEntities: # @schema minItems: 1; item: string; itemEnum: [all, cluster, host, remote-node, kube-apiserver, world, ingress]
+    - kube-apiserver
+    - remote-node
+
 allowEgressToDNS:
   enabled: false
   namespaces:

@@ -6,3 +6,7 @@ azureWorkloadIdentityWebhook:
   enabled: true
 hubbleRelay:
   enabled: true
+standardAllows:
+  webhookIngress:
+    fromEntities:
+    - cluster

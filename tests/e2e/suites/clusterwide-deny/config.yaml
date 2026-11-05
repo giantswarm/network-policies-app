@@ -3,7 +3,9 @@
 appName: network-policies
 repoName: network-policies-app
 appCatalog: cluster
-# Widens to all providers (PRD rung 1) once each has been run. AKS also needs
-# standardAllows.webhookIngress.fromEntities: [cluster] (giantswarm/roadmap#4341).
+# Widens to all providers (PRD rung 1) one at a time, each once it is green. AKS
+# also needs standardAllows.webhookIngress.fromEntities: [cluster]
+# (giantswarm/roadmap#4341).
 providers:
 - capa
+- capz

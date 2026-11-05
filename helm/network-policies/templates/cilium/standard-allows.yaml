@@ -44,7 +44,8 @@ spec:
     egress: false
   ingress:
     - fromEntities:
-        {{- toYaml .Values.standardAllows.webhookIngress.fromEntities | nindent 8 }}
+        {{- /* required: an ingress rule with only toPorts allows every source */}}
+        {{- required "standardAllows.webhookIngress.fromEntities must not be empty" .Values.standardAllows.webhookIngress.fromEntities | toYaml | nindent 8 }}
       toPorts:
         - ports:
             - port: "443"

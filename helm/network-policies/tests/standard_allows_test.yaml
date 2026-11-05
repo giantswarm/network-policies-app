@@ -222,23 +222,23 @@ tests:
     template: templates/cilium/standard-allows.yaml
     asserts:
       - equal:
-          path: spec.ingress[0].fromEntities
+          path: spec.ingress
           value:
-            - kube-apiserver
-            - remote-node
-      - equal:
-          path: spec.ingress[0].toPorts[0].ports
-          value:
-            - port: "443"
-              protocol: TCP
-            - port: "4443"
-              protocol: TCP
-            - port: "8443"
-              protocol: TCP
-            - port: "9443"
-              protocol: TCP
-            - port: "10250"
-              protocol: TCP
+            - fromEntities:
+                - kube-apiserver
+                - remote-node
+              toPorts:
+                - ports:
+                    - port: "443"
+                      protocol: TCP
+                    - port: "4443"
+                      protocol: TCP
+                    - port: "8443"
+                      protocol: TCP
+                    - port: "9443"
+                      protocol: TCP
+                    - port: "10250"
+                      protocol: TCP
 
   - it: takes the webhook ingress source from values (AKS uses cluster)
     set:
@@ -275,10 +275,26 @@ tests:
                     io.kubernetes.pod.namespace: kube-system
                     app.kubernetes.io/instance: alloy-metrics
 
-  - it: renders the standard allows unchanged with the clusterwide deny on
+  - it: renders all five standard allows with the clusterwide deny on
     set:
       denyByDefault.clusterWide.enabled: true
     template: templates/cilium/standard-allows.yaml
     asserts:
       - hasDocuments:
           count: 5
+
+  - it: renders all five standard allows with the default deny off entirely
+    set:
+      denyByDefault.enabled: false
+    template: templates/cilium/standard-allows.yaml
+    asserts:
+      - hasDocuments:
+          count: 5
+
+  - it: fails instead of opening the webhook ports to every source when fromEntities is empty
+    set:
+      standardAllows.webhookIngress.fromEntities: null
+    template: templates/cilium/standard-allows.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: standardAllows.webhookIngress.fromEntities must not be empty

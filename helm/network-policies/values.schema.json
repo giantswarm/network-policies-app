@@ -241,8 +241,6 @@
                                     "remote-node",
                                     "kube-apiserver",
                                     "world",
-                                    "world-ipv4",
-                                    "world-ipv6",
                                     "ingress"
                                 ]
                             },

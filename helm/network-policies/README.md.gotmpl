@@ -43,9 +43,10 @@ A label change takes effect within about a minute.
 | `policy.giantswarm.io/allow-metrics-scraping` | `standard-allow-metrics-scraping` | ingress from `alloy-metrics` in `kube-system` |
 
 - **Purely additive.** Every standard allow sets `enableDefaultDeny: {ingress: false, egress: false}`, so labelling a
-  namespace changes nothing while no deny covers it. Only the denies control default-deny.
-- **Webhook ingress source.** The default `[kube-apiserver, remote-node]` works on clusters running the Giant Swarm
-  Cilium app. AKS needs `[cluster]`.
+  namespace changes nothing while no deny covers it. Only the denies control default-deny. This needs Cilium 1.16 or
+  later with the agent flag `enable-non-default-deny-policies` on, which is the default.
+- **Webhook ingress source.** The default `[kube-apiserver, remote-node]` is verified on CAPA, CAPZ, CAPV and CAPVCD.
+  AKS needs `[cluster]`. EKS and CAPMOX are not verified yet.
 - **DNS for every name.** `allow-dns` is an L4 allow, like the clusterwide DNS allow. It widens a namespace's FQDN
   allow-list to every name. Namespaces with FQDN restrictions write their own DNS rule instead of using the label.
 - **Same-namespace traffic** is not a standard allow. The namespace owner applies a Same-namespace policy.

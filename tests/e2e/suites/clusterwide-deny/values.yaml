@@ -1,0 +1,8 @@
+# The clusterwide deny stays off at cluster creation: a default app's values
+# apply when the cluster is created, and a deny from the cluster's first minute
+# stops Kyverno from installing. The suite turns it on for the running cluster
+# through the cluster values (see cluster_values_test.go). The DNS allow stays
+# at its default (off) so the suite asserts the shipped behaviour.
+denyByDefault:
+  clusterWide:
+    enabled: false

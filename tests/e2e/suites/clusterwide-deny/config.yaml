@@ -1,0 +1,9 @@
+# Takes priority over ../../config.yaml for this suite only, so this suite has
+# its own provider list while the basic suite keeps its own.
+appName: network-policies
+repoName: network-policies-app
+appCatalog: cluster
+# Widens to all providers (PRD rung 1) once each has been run. AKS also needs
+# standardAllows.webhookIngress.fromEntities: [cluster] (giantswarm/roadmap#4341).
+providers:
+- capa

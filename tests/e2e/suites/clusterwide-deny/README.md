@@ -29,10 +29,16 @@ can still reach the API server.
 Implemented specs: cross-namespace deny, internet blocked (skipped when the
 opted-out control cannot reach the internet itself), live opt-out label flip
 without a pod restart, Same-namespace policy, DNS with `allow-dns`,
-`allow-kube-apiserver`, and all five allow labels set in one request.
+`allow-kube-apiserver`, `allow-webhook-ingress`, and all five allow labels set
+in one request.
 
-Pending (`PIt`, reason in the spec): `allow-webhook-ingress`,
-`allow-ingress-controller`, `allow-metrics-scraping`, DNS in
+The webhook spec scopes a `ValidatingWebhookConfiguration` (failurePolicy
+Ignore) to ConfigMap CREATE in its own namespace and points it at a listener
+pod that counts the connections it accepts. A ConfigMap CREATE that adds a
+connection means the API server reached the pod. It starts with the namespace
+opted out as the control.
+
+Pending (`PIt`, reason in the spec): `allow-ingress-controller`, `allow-metrics-scraping`, DNS in
 kube-system/giantswarm, `allowDNS` on, deny disabled parity, GS components and
 Cilium health, kyverno-crds install ordering.
 
@@ -52,6 +58,8 @@ dropped DNS query.
 - `probe_test.go` reusable helpers: namespaces and label changes,
   probe and listener pods, HTTP and DNS reachability assertions, the
   Same-namespace policy.
+- `webhook_test.go` the webhook listener, its `ValidatingWebhookConfiguration`
+  and the webhook reachability assertion.
 - `cluster_values_test.go` turns the clusterwide deny on and off through the
   cluster values and waits for the result.
 - `values.yaml` chart values for this suite (deny off at creation).

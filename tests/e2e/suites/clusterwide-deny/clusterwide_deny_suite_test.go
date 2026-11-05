@@ -35,6 +35,7 @@ const (
 	dnsNamespace           = "cwd-e2e-dns"
 	apiServerNamespace     = "cwd-e2e-apiserver"
 	allAllowsNamespace     = "cwd-e2e-allallows"
+	webhookNamespace       = "cwd-e2e-webhook"
 
 	// internetHost is a public HTTPS address, probed by IP so DNS plays no
 	// part.
@@ -285,7 +286,7 @@ func TestClusterwideDeny(t *testing.T) {
 
 					// Covers the DNS and API server allows. webhook-ingress,
 					// ingress-controller and metrics-scraping are labelled too but
-					// verified by their own pending specs.
+					// verified by their own specs.
 					It("keeps the DNS and API server allows working when all five allow labels are set in one request", func() {
 						ctx := state.GetContext()
 						wcClient := workloadClusterClient()
@@ -326,9 +327,36 @@ func TestClusterwideDeny(t *testing.T) {
 						Consistently(api).WithTimeout(30*time.Second).WithPolling(5*time.Second).Should(BeTrue(), "the API server became unreachable with all five labels set")
 					})
 
-					PIt("grants webhook ingress with allow-webhook-ingress", func() {
-						// The source is per provider and needs a webhook configuration
-						// pointing at a pod in the namespace; AKS needs `cluster`.
+					// The webhook source is per provider: the chart default
+					// [kube-apiserver, remote-node] covers the providers the
+					// spike ran on, AKS needs [cluster] (giantswarm/roadmap#4341).
+					It("grants webhook ingress with allow-webhook-ingress and removes it with the label", func() {
+						ctx := state.GetContext()
+						wcClient := workloadClusterClient()
+
+						// Starts opted out, so the first step proves the webhook is
+						// called and the listener counts the calls.
+						ensureNamespace(ctx, wcClient, webhookNamespace, map[string]string{optOutLabelKey: "false"})
+						ensureWebhookListener(ctx, wcClient)
+						DeferCleanup(func() {
+							deleteWebhookConfiguration(ctx, wcClient)
+						})
+						ensureWebhookConfiguration(ctx, wcClient)
+
+						By("reaching the listener from the API server while the namespace is opted out (control)")
+						expectWebhook(ctx, wcClient, true, 3*time.Minute)
+
+						By("not reaching it after removing the opt-out label")
+						setNamespaceLabels(ctx, wcClient, webhookNamespace, nil, optOutLabelKey)
+						expectWebhook(ctx, wcClient, false, labelTimeout)
+
+						By("reaching it after adding allow-webhook-ingress=true")
+						setNamespaceLabels(ctx, wcClient, webhookNamespace, map[string]string{allowWebhookIngressLabel: "true"})
+						expectWebhook(ctx, wcClient, true, labelTimeout)
+
+						By("not reaching it after removing the label")
+						setNamespaceLabels(ctx, wcClient, webhookNamespace, nil, allowWebhookIngressLabel)
+						expectWebhook(ctx, wcClient, false, labelTimeout)
 					})
 
 					PIt("grants ingress from the ingress controller with allow-ingress-controller", func() {
@@ -376,8 +404,9 @@ func TestClusterwideDeny(t *testing.T) {
 			// can still reach the API server.
 			disableClusterWideDeny(ctx)
 
+			deleteWebhookConfiguration(ctx, wcClient)
 			deleteNamespaces(ctx, wcClient, deniedNamespace, controlNamespace, targetNamespace,
-				sameNamespaceNamespace, dnsNamespace, apiServerNamespace, allAllowsNamespace)
+				sameNamespaceNamespace, dnsNamespace, apiServerNamespace, allAllowsNamespace, webhookNamespace)
 		}).
 		Run(t, "Clusterwide Deny Test")
 }

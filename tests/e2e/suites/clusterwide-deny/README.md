@@ -8,14 +8,15 @@ pods, not on rendered manifests.
 
 ## Status
 
-Green on CAPA with the clusterwide deny (giantswarm/roadmap#4340) and the
-label-selected standard allows (giantswarm/roadmap#4376) in the chart. It runs
-on CAPA and CAPZ so far: the other providers are added one at a time once each
-is green, and AKS also needs `standardAllows.webhookIngress.fromEntities:
-[cluster]` from its cluster values (giantswarm/roadmap#4341). Every provider in
-`config.yaml` is a required check on every PR (Heimdall), so only add one after
-a green run on it. The specs run in an `Ordered` container, so after the first
-failure the rest are skipped.
+Runs with the clusterwide deny (giantswarm/roadmap#4340) and the label-selected
+standard allows (giantswarm/roadmap#4376) in the chart, on CAPA (`capa`) and
+CAPZ (`capz`, cluster-azure). The other providers are added one at a time, each
+in its own PR that only merges once the suite is green on that provider there:
+every provider in `config.yaml` becomes a required check on every PR
+(Heimdall). AKS (`aks`, cluster-aks) is a separate provider from CAPZ and also
+needs `standardAllows.webhookIngress.fromEntities: [cluster]` from its cluster
+values (giantswarm/roadmap#4341). The specs run in an `Ordered` container, so
+after the first failure the rest are skipped.
 
 The cluster is created with the clusterwide deny off. A deny from the cluster's
 first minute stops Kyverno from installing (its jobs cannot reach the API

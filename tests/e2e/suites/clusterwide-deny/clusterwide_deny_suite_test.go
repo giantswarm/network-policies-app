@@ -79,16 +79,17 @@ func TestClusterwideDeny(t *testing.T) {
 						Should(BeTrue())
 				})
 
-				// The deny is switched on only now, on the running cluster: set
-				// at creation it stops default apps such as Kyverno from
-				// installing (see enableClusterWideDeny).
-				It("turns on the clusterwide deny through the cluster values", func() {
-					ctx := state.GetContext()
-					enableClusterWideDeny(ctx)
-					expectClusterWideDenyPolicy(ctx)
-				})
+				Describe("connectivity", Ordered, func() {
+					// The deny is switched on only now, on the running cluster:
+					// set at creation it stops default apps such as Kyverno from
+					// installing (see setClusterWideDeny). A BeforeAll, so a
+					// focused spec still runs with the deny on.
+					BeforeAll(func() {
+						ctx := state.GetContext()
+						Expect(setClusterWideDeny(ctx, true)).To(Succeed())
+						expectClusterWideDenyPolicy(ctx)
+					})
 
-				Describe("connectivity", func() {
 					It("blocks a probe in an unlabeled namespace from reaching another namespace", func() {
 						ctx := state.GetContext()
 						wcClient := workloadClusterClient()
@@ -338,7 +339,8 @@ func TestClusterwideDeny(t *testing.T) {
 					})
 
 					PIt("matches today's behaviour when the clusterwide deny is disabled (per-namespace default-deny-all in kube-system/giantswarm, customer namespaces unaffected)", func() {
-						// Needs a values flip or a separate suite with the key set to false.
+						// The cluster now starts with the deny off, so this could run
+						// before the deny is turned on.
 					})
 
 					PIt("keeps Giant Swarm components healthy and Cilium reporting healthy with the clusterwide deny on", func() {
@@ -367,6 +369,10 @@ func TestClusterwideDeny(t *testing.T) {
 				logger.Log("Skipping namespace cleanup, no workload cluster client: %s", err)
 				return
 			}
+
+			// Off before teardown, so uninstall hooks in denied namespaces
+			// can still reach the API server.
+			disableClusterWideDeny(ctx)
 
 			deleteNamespaces(ctx, wcClient, deniedNamespace, controlNamespace, targetNamespace,
 				sameNamespaceNamespace, dnsNamespace, apiServerNamespace, allAllowsNamespace)

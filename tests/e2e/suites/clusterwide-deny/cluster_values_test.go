@@ -7,10 +7,12 @@ import (
 
 	. "github.com/onsi/gomega"
 
+	helmv2 "github.com/fluxcd/helm-controller/api/v2"
 	"github.com/giantswarm/apptest-framework/v5/pkg/state"
 	"github.com/giantswarm/clustertest/v5/pkg/logger"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -33,8 +35,8 @@ const (
 // the cluster (buildDefaultAppValues).
 var networkPoliciesValuesPath = []string{"global", "apps", "networkPolicies", "values"}
 
-// enableClusterWideDeny turns the clusterwide deny on for the running cluster
-// the way a customer would: through the network-policies values in the
+// setClusterWideDeny turns the clusterwide deny on or off for the running
+// cluster the way a customer would: through the network-policies values in the
 // cluster app's user config. The cluster chart then re-renders the
 // network-policies HelmRelease with the new values.
 //
@@ -42,13 +44,13 @@ var networkPoliciesValuesPath = []string{"global", "apps", "networkPolicies", "v
 // values apply when the cluster is created, and a clusterwide deny from the
 // cluster's first minute stops default apps (Kyverno) from installing before
 // the standard allows and the per-app allows exist.
-func enableClusterWideDeny(ctx context.Context) {
+func setClusterWideDeny(ctx context.Context, enabled bool) error {
 	cluster := state.GetCluster()
 	key := types.NamespacedName{
 		Name:      fmt.Sprintf("%s-userconfig", cluster.ClusterApp.InstallName),
 		Namespace: cluster.ClusterApp.GetNamespace(),
 	}
-	logger.Log("Enabling the clusterwide deny in the cluster values %s", key)
+	logger.Log("Setting denyByDefault.clusterWide.enabled=%t in the cluster values %s", enabled, key)
 
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cm := &corev1.ConfigMap{}
@@ -61,7 +63,7 @@ func enableClusterWideDeny(ctx context.Context) {
 			return fmt.Errorf("failed to parse the cluster values in %s: %w", key, err)
 		}
 		path := append(append([]string{}, networkPoliciesValuesPath...), "denyByDefault", "clusterWide", "enabled")
-		if err := unstructured.SetNestedField(values, true, path...); err != nil {
+		if err := unstructured.SetNestedField(values, enabled, path...); err != nil {
 			return fmt.Errorf("failed to set %v in the cluster values in %s: %w", path, key, err)
 		}
 		out, err := yaml.Marshal(values)
@@ -75,21 +77,89 @@ func enableClusterWideDeny(ctx context.Context) {
 		cm.Data[clusterValuesDataKey] = string(out)
 		return state.GetFramework().MC().Update(ctx, cm)
 	})
-	Expect(err).NotTo(HaveOccurred(), "failed to enable the clusterwide deny in the cluster values %s", key)
+	if err != nil {
+		return fmt.Errorf("failed to set the clusterwide deny in the cluster values %s: %w", key, err)
+	}
+	return nil
+}
+
+// clusterWideDenyPolicyExists reports whether the chart's clusterwide deny
+// CCNP exists in the workload cluster.
+func clusterWideDenyPolicyExists(ctx context.Context) (bool, error) {
+	policy := &unstructured.Unstructured{}
+	policy.SetAPIVersion("cilium.io/v2")
+	policy.SetKind("CiliumClusterwideNetworkPolicy")
+	err := workloadClusterClient().Get(ctx, types.NamespacedName{Name: clusterWideDenyPolicyName}, policy)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // expectClusterWideDenyPolicy waits until the chart's clusterwide deny CCNP
-// exists in the workload cluster. The cluster app and then the
-// network-policies HelmRelease both have to reconcile first.
+// exists in the workload cluster and the network-policies HelmRelease has
+// settled on the new values. The cluster app and then the HelmRelease both
+// have to reconcile first. Waiting for the HelmRelease too catches an upgrade
+// that renders the CCNP and is then rolled back.
 func expectClusterWideDenyPolicy(ctx context.Context) {
-	wcClient := workloadClusterClient()
-	Eventually(func() error {
-		policy := &unstructured.Unstructured{}
-		policy.SetAPIVersion("cilium.io/v2")
-		policy.SetKind("CiliumClusterwideNetworkPolicy")
-		return wcClient.Get(ctx, types.NamespacedName{Name: clusterWideDenyPolicyName}, policy)
-	}).
+	Eventually(func() (bool, error) { return clusterWideDenyPolicyExists(ctx) }).
 		WithTimeout(15*time.Minute).
 		WithPolling(15*time.Second).
-		Should(Succeed(), "the CiliumClusterwideNetworkPolicy %s did not appear after enabling the clusterwide deny in the cluster values", clusterWideDenyPolicyName)
+		Should(BeTrue(), "the CiliumClusterwideNetworkPolicy %s did not appear after enabling the clusterwide deny in the cluster values", clusterWideDenyPolicyName)
+
+	Eventually(func() error { return networkPoliciesReleaseSettled(ctx) }).
+		WithTimeout(5*time.Minute).
+		WithPolling(15*time.Second).
+		Should(Succeed(), "the network-policies HelmRelease did not settle after enabling the clusterwide deny")
+
+	Consistently(func() (bool, error) { return clusterWideDenyPolicyExists(ctx) }).
+		WithTimeout(time.Minute).
+		WithPolling(15*time.Second).
+		Should(BeTrue(), "the CiliumClusterwideNetworkPolicy %s went away again after the HelmRelease settled", clusterWideDenyPolicyName)
+}
+
+// networkPoliciesReleaseSettled returns nil when the network-policies
+// HelmRelease on the management cluster is Ready for its current generation.
+func networkPoliciesReleaseSettled(ctx context.Context) error {
+	cluster := state.GetCluster()
+	key := types.NamespacedName{
+		Name:      fmt.Sprintf("%s-network-policies", cluster.Name),
+		Namespace: cluster.Organization.GetNamespace(),
+	}
+	release := &helmv2.HelmRelease{}
+	if err := state.GetFramework().MC().Get(ctx, key, release); err != nil {
+		return err
+	}
+	if release.Status.ObservedGeneration != release.Generation {
+		return fmt.Errorf("HelmRelease %s observed generation %d, want %d", key, release.Status.ObservedGeneration, release.Generation)
+	}
+	for _, c := range release.Status.Conditions {
+		if c.Type == "Ready" {
+			if c.Status == "True" && c.ObservedGeneration == release.Generation {
+				return nil
+			}
+			return fmt.Errorf("HelmRelease %s not ready [%s]: %s", key, c.Reason, c.Message)
+		}
+	}
+	return fmt.Errorf("HelmRelease %s has no Ready condition", key)
+}
+
+// disableClusterWideDeny turns the deny off again before the cluster is torn
+// down, so uninstall hooks in denied namespaces can reach the API server.
+// Best effort: it only logs, since the cluster is deleted either way.
+func disableClusterWideDeny(ctx context.Context) {
+	if err := setClusterWideDeny(ctx, false); err != nil {
+		logger.Log("Could not turn the clusterwide deny off before teardown: %s", err)
+		return
+	}
+	deadline := time.Now().Add(10 * time.Minute)
+	for time.Now().Before(deadline) {
+		exists, err := clusterWideDenyPolicyExists(ctx)
+		if err == nil && !exists {
+			logger.Log("The clusterwide deny is off")
+			return
+		}
+		time.Sleep(15 * time.Second)
+	}
+	logger.Log("The CiliumClusterwideNetworkPolicy %s was still there 10 minutes after turning the deny off; tearing down anyway", clusterWideDenyPolicyName)
 }

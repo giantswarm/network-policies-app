@@ -2,8 +2,8 @@
 
 Rung 1 of the environment ladder for the clusterwide deny
 (giantswarm/roadmap#4346, plan: cabbage-plans `default-deny-netpol`).
-It installs network-policies-app with the clusterwide deny enabled on an
-ephemeral workload cluster and asserts on observable connectivity from probe
+It installs network-policies-app on an ephemeral workload cluster, turns the
+clusterwide deny on and asserts on observable connectivity from probe
 pods, not on rendered manifests.
 
 ## Status
@@ -18,11 +18,13 @@ are skipped. Do not wire it into a required check before #4376 lands.
 
 The cluster is created with the clusterwide deny off. A deny from the cluster's
 first minute stops Kyverno from installing (its jobs cannot reach the API
-server), so the default apps never become ready and no spec runs. The first spec
-after the install turns the deny on for the running cluster through the
+server), so the default apps never become ready and no spec runs. A `BeforeAll` in
+the connectivity specs turns the deny on for the running cluster through the
 network-policies values in the cluster app's user config
 (`global.apps.networkPolicies.values`), the way a customer would, and waits for
-`default-deny-all-namespaces` to exist.
+`default-deny-all-namespaces` to exist and the HelmRelease to settle. The
+AfterSuite turns it off again before the cluster is deleted, so uninstall hooks
+can still reach the API server.
 
 Implemented specs: cross-namespace deny, internet blocked (skipped when the
 opted-out control cannot reach the internet itself), live opt-out label flip
@@ -50,7 +52,9 @@ dropped DNS query.
 - `probe_test.go` reusable helpers: namespaces and label changes,
   probe and listener pods, HTTP and DNS reachability assertions, the
   Same-namespace policy.
-- `values.yaml` chart values for this suite.
+- `cluster_values_test.go` turns the clusterwide deny on and off through the
+  cluster values and waits for the result.
+- `values.yaml` chart values for this suite (deny off at creation).
 - `config.yaml` provider list (overrides `../../config.yaml` for this suite).
 
 ## Running

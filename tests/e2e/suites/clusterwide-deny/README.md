@@ -8,13 +8,13 @@ pods, not on rendered manifests.
 
 ## Status
 
-Implemented, partly red until giantswarm/roadmap#4376 lands. The chart has
-`denyByDefault.clusterWide.enabled` since giantswarm/roadmap#4340, so the
-install and the specs that only need the clusterwide deny are expected to pass.
-The allow-label specs (DNS with `allow-dns`, `allow-kube-apiserver`, all five
-labels) need the label-selected standard allows from #4376 and fail until then.
-The specs run in an `Ordered` container, so after the first failure the rest
-are skipped. Do not wire it into a required check before #4376 lands.
+Green on CAPA with the clusterwide deny (giantswarm/roadmap#4340) and the
+label-selected standard allows (giantswarm/roadmap#4376) in the chart. It runs
+on CAPA only so far: the other providers have not been run yet, and AKS also
+needs `standardAllows.webhookIngress.fromEntities: [cluster]` from its cluster
+values (giantswarm/roadmap#4341). The specs run in an `Ordered` container, so
+after the first failure the rest are skipped. Do not wire it into a required
+check before it is green on every provider.
 
 The cluster is created with the clusterwide deny off. A deny from the cluster's
 first minute stops Kyverno from installing (its jobs cannot reach the API

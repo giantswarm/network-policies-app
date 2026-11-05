@@ -1,0 +1,91 @@
+{{- /*
+Standard allows: one static CiliumClusterwideNetworkPolicy per allow label policy.giantswarm.io/allow-<x>: "true".
+Always rendered, also without the clusterwide deny. enableDefaultDeny false keeps them purely additive: a policy that
+selects an endpoint with an ingress (egress) section would otherwise put it into default-deny for that direction, so
+labelling a namespace would lock it down. Only the denies control default-deny. L4 only, since enableDefaultDeny false
+does not cover L7 rules.
+*/}}
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: standard-allow-dns
+spec:
+  endpointSelector:
+    {{- include "network-policies-app.standardAllow.endpointSelector" "dns" | nindent 4 }}
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    {{- include "network-policies-app.dnsEgress" . | nindent 4 }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: standard-allow-kube-apiserver
+spec:
+  endpointSelector:
+    {{- include "network-policies-app.standardAllow.endpointSelector" "kube-apiserver" | nindent 4 }}
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEntities:
+        - kube-apiserver
+---
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: standard-allow-webhook-ingress
+spec:
+  endpointSelector:
+    {{- include "network-policies-app.standardAllow.endpointSelector" "webhook-ingress" | nindent 4 }}
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    - fromEntities:
+        {{- toYaml .Values.standardAllows.webhookIngress.fromEntities | nindent 8 }}
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "4443"
+              protocol: TCP
+            - port: "8443"
+              protocol: TCP
+            - port: "9443"
+              protocol: TCP
+            - port: "10250"
+              protocol: TCP
+---
+# The allow label key stays generic, so the source can change without breaking the label contract.
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: standard-allow-ingress-controller
+spec:
+  endpointSelector:
+    {{- include "network-policies-app.standardAllow.endpointSelector" "ingress-controller" | nindent 4 }}
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: envoy-gateway-system
+---
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: standard-allow-metrics-scraping
+spec:
+  endpointSelector:
+    {{- include "network-policies-app.standardAllow.endpointSelector" "metrics-scraping" | nindent 4 }}
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            app.kubernetes.io/instance: alloy-metrics

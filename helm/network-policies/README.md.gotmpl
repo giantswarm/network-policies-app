@@ -28,6 +28,26 @@ The switch is off by default and is opted into per cluster. It is independent of
   set `denyByDefault.clusterWide.enabled: false`, which restores the per-namespace policies
   as long as `denyByDefault.enabled` is still true.
 
-Standard allows and allow labels come in a later change (giantswarm/roadmap#4376).
+## Standard allows
+
+Five standard allows are always rendered, one `CiliumClusterwideNetworkPolicy` each. A standard allow applies to the
+namespaces carrying its allow label with the value `"true"`. Removing the label removes the namespace from the allow.
+A label change takes effect within about a minute.
+
+| Allow label | Policy | Allows |
+|---|---|---|
+| `policy.giantswarm.io/allow-dns` | `standard-allow-dns` | egress to CoreDNS, node-local DNS cache and kube-dns, L4 only |
+| `policy.giantswarm.io/allow-kube-apiserver` | `standard-allow-kube-apiserver` | egress to the `kube-apiserver` entity |
+| `policy.giantswarm.io/allow-webhook-ingress` | `standard-allow-webhook-ingress` | ingress from `standardAllows.webhookIngress.fromEntities` on TCP 443, 4443, 8443, 9443 and 10250 |
+| `policy.giantswarm.io/allow-ingress-controller` | `standard-allow-ingress-controller` | ingress from `envoy-gateway-system` |
+| `policy.giantswarm.io/allow-metrics-scraping` | `standard-allow-metrics-scraping` | ingress from `alloy-metrics` in `kube-system` |
+
+- **Purely additive.** Every standard allow sets `enableDefaultDeny: {ingress: false, egress: false}`, so labelling a
+  namespace changes nothing while no deny covers it. Only the denies control default-deny.
+- **Webhook ingress source.** The default `[kube-apiserver, remote-node]` works on clusters running the Giant Swarm
+  Cilium app. AKS needs `[cluster]`.
+- **DNS for every name.** `allow-dns` is an L4 allow, like the clusterwide DNS allow. It widens a namespace's FQDN
+  allow-list to every name. Namespaces with FQDN restrictions write their own DNS rule instead of using the label.
+- **Same-namespace traffic** is not a standard allow. The namespace owner applies a Same-namespace policy.
 
 {{ template "chart.valuesSection" . }}

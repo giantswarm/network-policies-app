@@ -1,0 +1,284 @@
+suite: standard allows
+templates:
+  - templates/cilium/standard-allows.yaml
+  - templates/cilium/clusterwide-allow-dns.yaml
+tests:
+  - it: renders the five standard allows with the defaults, without the clusterwide deny
+    asserts:
+      - hasDocuments:
+          count: 5
+        template: templates/cilium/standard-allows.yaml
+
+  - it: makes standard-allow-dns select the namespaces labelled allow-dns, additively and one direction only
+    documentIndex: 0
+    template: templates/cilium/standard-allows.yaml
+    asserts:
+      - isKind:
+          of: CiliumClusterwideNetworkPolicy
+      - equal:
+          path: metadata.name
+          value: standard-allow-dns
+      - equal:
+          path: spec.endpointSelector
+          value:
+            matchExpressions:
+              - key: io.cilium.k8s.namespace.labels.policy.giantswarm.io/allow-dns
+                operator: In
+                values:
+                  - "true"
+      - equal:
+          path: spec.enableDefaultDeny
+          value:
+            ingress: false
+            egress: false
+      - isNotEmpty:
+          path: spec.egress
+      - notExists:
+          path: spec.ingress
+
+  - it: makes standard-allow-kube-apiserver select the namespaces labelled allow-kube-apiserver, additively and one direction only
+    documentIndex: 1
+    template: templates/cilium/standard-allows.yaml
+    asserts:
+      - isKind:
+          of: CiliumClusterwideNetworkPolicy
+      - equal:
+          path: metadata.name
+          value: standard-allow-kube-apiserver
+      - equal:
+          path: spec.endpointSelector
+          value:
+            matchExpressions:
+              - key: io.cilium.k8s.namespace.labels.policy.giantswarm.io/allow-kube-apiserver
+                operator: In
+                values:
+                  - "true"
+      - equal:
+          path: spec.enableDefaultDeny
+          value:
+            ingress: false
+            egress: false
+      - isNotEmpty:
+          path: spec.egress
+      - notExists:
+          path: spec.ingress
+
+  - it: makes standard-allow-webhook-ingress select the namespaces labelled allow-webhook-ingress, additively and one direction only
+    documentIndex: 2
+    template: templates/cilium/standard-allows.yaml
+    asserts:
+      - isKind:
+          of: CiliumClusterwideNetworkPolicy
+      - equal:
+          path: metadata.name
+          value: standard-allow-webhook-ingress
+      - equal:
+          path: spec.endpointSelector
+          value:
+            matchExpressions:
+              - key: io.cilium.k8s.namespace.labels.policy.giantswarm.io/allow-webhook-ingress
+                operator: In
+                values:
+                  - "true"
+      - equal:
+          path: spec.enableDefaultDeny
+          value:
+            ingress: false
+            egress: false
+      - isNotEmpty:
+          path: spec.ingress
+      - notExists:
+          path: spec.egress
+
+  - it: makes standard-allow-ingress-controller select the namespaces labelled allow-ingress-controller, additively and one direction only
+    documentIndex: 3
+    template: templates/cilium/standard-allows.yaml
+    asserts:
+      - isKind:
+          of: CiliumClusterwideNetworkPolicy
+      - equal:
+          path: metadata.name
+          value: standard-allow-ingress-controller
+      - equal:
+          path: spec.endpointSelector
+          value:
+            matchExpressions:
+              - key: io.cilium.k8s.namespace.labels.policy.giantswarm.io/allow-ingress-controller
+                operator: In
+                values:
+                  - "true"
+      - equal:
+          path: spec.enableDefaultDeny
+          value:
+            ingress: false
+            egress: false
+      - isNotEmpty:
+          path: spec.ingress
+      - notExists:
+          path: spec.egress
+
+  - it: makes standard-allow-metrics-scraping select the namespaces labelled allow-metrics-scraping, additively and one direction only
+    documentIndex: 4
+    template: templates/cilium/standard-allows.yaml
+    asserts:
+      - isKind:
+          of: CiliumClusterwideNetworkPolicy
+      - equal:
+          path: metadata.name
+          value: standard-allow-metrics-scraping
+      - equal:
+          path: spec.endpointSelector
+          value:
+            matchExpressions:
+              - key: io.cilium.k8s.namespace.labels.policy.giantswarm.io/allow-metrics-scraping
+                operator: In
+                values:
+                  - "true"
+      - equal:
+          path: spec.enableDefaultDeny
+          value:
+            ingress: false
+            egress: false
+      - isNotEmpty:
+          path: spec.ingress
+      - notExists:
+          path: spec.egress
+
+  - it: keeps every standard allow L4 only (no L7 rules, which enableDefaultDeny false does not cover)
+    template: templates/cilium/standard-allows.yaml
+    asserts:
+      - notExists:
+          path: spec.egress[0].toPorts[0].rules
+      - notExists:
+          path: spec.ingress[0].toPorts[0].rules
+
+  - it: gives allow-dns exactly the DNS egress of the clusterwide DNS allow
+    set:
+      denyByDefault.clusterWide.enabled: true
+      denyByDefault.clusterWide.allowDNS.enabled: true
+    asserts:
+      - equal:
+          path: spec.egress
+          value:
+            - toEndpoints:
+                - matchLabels:
+                    io.kubernetes.pod.namespace: kube-system
+                    k8s-app: coredns
+                - matchLabels:
+                    io.kubernetes.pod.namespace: kube-system
+                    k8s-app: k8s-dns-node-cache
+                - matchLabels:
+                    io.kubernetes.pod.namespace: kube-system
+                    k8s-app: kube-dns
+              toPorts:
+                - ports:
+                    - port: "1053"
+                      protocol: UDP
+                    - port: "1053"
+                      protocol: TCP
+                    - port: "53"
+                      protocol: UDP
+                    - port: "53"
+                      protocol: TCP
+        documentIndex: 0
+        template: templates/cilium/standard-allows.yaml
+      - equal:
+          path: spec.egress
+          value:
+            - toEndpoints:
+                - matchLabels:
+                    io.kubernetes.pod.namespace: kube-system
+                    k8s-app: coredns
+                - matchLabels:
+                    io.kubernetes.pod.namespace: kube-system
+                    k8s-app: k8s-dns-node-cache
+                - matchLabels:
+                    io.kubernetes.pod.namespace: kube-system
+                    k8s-app: kube-dns
+              toPorts:
+                - ports:
+                    - port: "1053"
+                      protocol: UDP
+                    - port: "1053"
+                      protocol: TCP
+                    - port: "53"
+                      protocol: UDP
+                    - port: "53"
+                      protocol: TCP
+        template: templates/cilium/clusterwide-allow-dns.yaml
+
+  - it: allows kube-apiserver egress to the kube-apiserver entity
+    documentIndex: 1
+    template: templates/cilium/standard-allows.yaml
+    asserts:
+      - equal:
+          path: spec.egress
+          value:
+            - toEntities:
+                - kube-apiserver
+
+  - it: takes webhook ingress from kube-apiserver and remote-node on the webhook ports by default
+    documentIndex: 2
+    template: templates/cilium/standard-allows.yaml
+    asserts:
+      - equal:
+          path: spec.ingress[0].fromEntities
+          value:
+            - kube-apiserver
+            - remote-node
+      - equal:
+          path: spec.ingress[0].toPorts[0].ports
+          value:
+            - port: "443"
+              protocol: TCP
+            - port: "4443"
+              protocol: TCP
+            - port: "8443"
+              protocol: TCP
+            - port: "9443"
+              protocol: TCP
+            - port: "10250"
+              protocol: TCP
+
+  - it: takes the webhook ingress source from values (AKS uses cluster)
+    set:
+      standardAllows.webhookIngress.fromEntities:
+        - cluster
+    documentIndex: 2
+    template: templates/cilium/standard-allows.yaml
+    asserts:
+      - equal:
+          path: spec.ingress[0].fromEntities
+          value:
+            - cluster
+
+  - it: allows ingress from envoy-gateway-system for allow-ingress-controller
+    documentIndex: 3
+    template: templates/cilium/standard-allows.yaml
+    asserts:
+      - equal:
+          path: spec.ingress
+          value:
+            - fromEndpoints:
+                - matchLabels:
+                    io.kubernetes.pod.namespace: envoy-gateway-system
+
+  - it: allows ingress from alloy-metrics in kube-system for allow-metrics-scraping
+    documentIndex: 4
+    template: templates/cilium/standard-allows.yaml
+    asserts:
+      - equal:
+          path: spec.ingress
+          value:
+            - fromEndpoints:
+                - matchLabels:
+                    io.kubernetes.pod.namespace: kube-system
+                    app.kubernetes.io/instance: alloy-metrics
+
+  - it: renders the standard allows unchanged with the clusterwide deny on
+    set:
+      denyByDefault.clusterWide.enabled: true
+    template: templates/cilium/standard-allows.yaml
+    asserts:
+      - hasDocuments:
+          count: 5

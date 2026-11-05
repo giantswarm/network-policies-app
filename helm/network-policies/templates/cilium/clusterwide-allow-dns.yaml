@@ -11,26 +11,5 @@ spec:
     ingress: false
     egress: false
   egress:
-    - toEndpoints:
-        - matchLabels:
-            io.kubernetes.pod.namespace: kube-system
-            k8s-app: coredns
-        - matchLabels:
-            io.kubernetes.pod.namespace: kube-system
-            k8s-app: k8s-dns-node-cache
-        - matchLabels:
-            io.kubernetes.pod.namespace: kube-system
-            k8s-app: kube-dns # Used in AKS
-      # L4 only, never the rules.dns block of allow-dns.yaml: an L4 DNS allow widens customer FQDN allow-lists,
-      # and an L7 rule here would put the DNS of every namespace through the proxy.
-      toPorts:
-        - ports:
-            - port: "1053"
-              protocol: UDP
-            - port: "1053"
-              protocol: TCP
-            - port: "53"
-              protocol: UDP
-            - port: "53"
-              protocol: TCP
+    {{- include "network-policies-app.dnsEgress" . | nindent 4 }}
 {{- end }}

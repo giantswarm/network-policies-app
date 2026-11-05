@@ -197,6 +197,12 @@ exec nc -lk -p %d -e /tmp/r.sh`, listenerPort)
 // ensurePod creates the pod if needed and waits for it to be Ready. A non-zero
 // readinessPort adds a TCP readiness probe, so Ready means the port is bound.
 func ensurePod(ctx context.Context, wcClient *client.Client, namespace, name string, args []string, readinessPort int) {
+	ensurePodWithLabels(ctx, wcClient, namespace, name, args, readinessPort, nil)
+}
+
+// ensurePodWithLabels is ensurePod with extra pod labels, e.g. for a Service
+// selector. An existing pod missing one of them is recreated.
+func ensurePodWithLabels(ctx context.Context, wcClient *client.Client, namespace, name string, args []string, readinessPort int, labels map[string]string) {
 	nonRoot := true
 	allowPrivilegeEscalation := false
 	userAndGroup := int64(35)
@@ -223,6 +229,7 @@ func ensurePod(ctx context.Context, wcClient *client.Client, namespace, name str
 	}
 
 	pod.Labels = map[string]string{ownerLabelKey: ownerLabelValue}
+	maps.Copy(pod.Labels, labels)
 	if readinessPort != 0 {
 		pod.Spec.Containers[0].ReadinessProbe = &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
@@ -257,7 +264,7 @@ func ensurePod(ctx context.Context, wcClient *client.Client, namespace, name str
 }
 
 // recreateUnhealthyPod deletes an existing pod that is not owned by this suite,
-// has finished, or differs from the desired image/args, and waits until it is
+// has finished, or differs from the desired image/args/labels, and waits until it is
 // gone so the caller can create a fresh one.
 func recreateUnhealthyPod(ctx context.Context, wcClient *client.Client, desired *corev1.Pod) {
 	existing := &corev1.Pod{}
@@ -273,6 +280,9 @@ func recreateUnhealthyPod(ctx context.Context, wcClient *client.Client, desired 
 		len(existing.Spec.Containers) == 1 &&
 		existing.Spec.Containers[0].Image == desired.Spec.Containers[0].Image &&
 		slices.Equal(existing.Spec.Containers[0].Args, desired.Spec.Containers[0].Args)
+	for key, value := range desired.Labels {
+		healthy = healthy && existing.Labels[key] == value
+	}
 	if healthy {
 		return
 	}

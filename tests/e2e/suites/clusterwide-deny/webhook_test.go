@@ -32,9 +32,19 @@ const (
 	webhookCallsFile = "/tmp/webhook-calls"
 	// webhookTimeoutSeconds bounds how long the API server waits for the
 	// webhook. failurePolicy Ignore lets the request through after that, so a
-	// blocked webhook only slows down ConfigMap creation in webhookNamespace.
+	// blocked webhook only slows down the probe request.
 	webhookTimeoutSeconds = 3
+
+	// webhookRoleLabel marks the listener pod, so the Service selects it and
+	// nothing else in the namespace.
+	webhookRoleLabel = "e2e.giantswarm.io/role"
+	// webhookProbeLabel marks the probe ConfigMaps. The webhook's object
+	// selector only matches these, so other ConfigMap writes in the namespace
+	// (kube-root-ca.crt) never call it.
+	webhookProbeLabel = "e2e.giantswarm.io/webhook-probe"
 )
+
+var webhookPodLabels = map[string]string{webhookRoleLabel: "webhook-listener"}
 
 // ensureWebhookListener makes sure webhookNamespace holds a pod that accepts
 // TCP connections on webhookPort and records each one in webhookCallsFile,
@@ -49,34 +59,51 @@ echo . >> %s
 EOF
 chmod 755 /tmp/r.sh
 exec nc -lk -p %d -e /tmp/r.sh`, webhookCallsFile, webhookPort)
-	ensurePod(ctx, wcClient, webhookNamespace, webhookName, []string{"sh", "-c", script}, 0)
+	ensurePodWithLabels(ctx, wcClient, webhookNamespace, webhookName, []string{"sh", "-c", script}, 0, webhookPodLabels)
 
-	// The suite gives every pod only the owner label, and the listener is the
-	// only pod in webhookNamespace, so the owner label selects it.
-	service := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      webhookName,
-			Namespace: webhookNamespace,
-			Labels:    map[string]string{ownerLabelKey: ownerLabelValue},
-		},
-		Spec: corev1.ServiceSpec{
-			Selector: map[string]string{ownerLabelKey: ownerLabelValue},
-			Ports: []corev1.ServicePort{{
-				Port:       webhookPort,
-				TargetPort: intstr.FromInt32(webhookPort),
-				Protocol:   corev1.ProtocolTCP,
-			}},
-		},
+	desired := corev1.ServiceSpec{
+		Selector: webhookPodLabels,
+		Ports: []corev1.ServicePort{{
+			Port:       webhookPort,
+			TargetPort: intstr.FromInt32(webhookPort),
+			Protocol:   corev1.ProtocolTCP,
+		}},
 	}
-	err := wcClient.Create(ctx, service)
-	if err != nil && !apierrors.IsAlreadyExists(err) {
-		Expect(err).NotTo(HaveOccurred())
-	}
+	// Retry on conflicts, and reconcile a suite-owned Service from an earlier
+	// run to the desired selector and ports.
+	Eventually(func() error {
+		service := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      webhookName,
+				Namespace: webhookNamespace,
+				Labels:    map[string]string{ownerLabelKey: ownerLabelValue},
+			},
+			Spec: desired,
+		}
+		err := wcClient.Create(ctx, service)
+		if err == nil || !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+		existing := &corev1.Service{}
+		if err := wcClient.Get(ctx, cr.ObjectKeyFromObject(service), existing); err != nil {
+			return err
+		}
+		if existing.Labels[ownerLabelKey] != ownerLabelValue {
+			return StopTrying(fmt.Sprintf("Service %s/%s already exists and is not owned by this suite", webhookNamespace, webhookName))
+		}
+		existing.Spec.Selector = desired.Selector
+		existing.Spec.Ports = desired.Ports
+		return wcClient.Update(ctx, existing)
+	}).
+		WithTimeout(30 * time.Second).
+		WithPolling(time.Second).
+		Should(Succeed())
 }
 
-// webhookConfiguration calls the listener for every ConfigMap CREATE in
-// webhookNamespace and nowhere else. failurePolicy Ignore keeps a blocked or
-// failing call from rejecting the ConfigMap.
+// webhookConfiguration calls the listener for every CREATE of a probe
+// ConfigMap in webhookNamespace and nothing else. failurePolicy Ignore keeps
+// a blocked or failing call from rejecting the request. sideEffects None lets
+// dry-run requests call it.
 func webhookConfiguration() *admissionregistrationv1.ValidatingWebhookConfiguration {
 	failurePolicy := admissionregistrationv1.Ignore
 	sideEffects := admissionregistrationv1.SideEffectClassNone
@@ -107,6 +134,9 @@ func webhookConfiguration() *admissionregistrationv1.ValidatingWebhookConfigurat
 			NamespaceSelector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{corev1.LabelMetadataName: webhookNamespace},
 			},
+			ObjectSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{webhookProbeLabel: "true"},
+			},
 			Rules: []admissionregistrationv1.RuleWithOperations{{
 				Operations: []admissionregistrationv1.OperationType{admissionregistrationv1.Create},
 				Rule: admissionregistrationv1.Rule{
@@ -121,18 +151,28 @@ func webhookConfiguration() *admissionregistrationv1.ValidatingWebhookConfigurat
 }
 
 // ensureWebhookConfiguration creates the ValidatingWebhookConfiguration, or
-// leaves a suite-owned one from an earlier run in place. One that is not
-// owned by the suite fails the test.
+// reconciles a suite-owned one from an earlier run to the desired webhooks.
+// One that is not owned by the suite fails the test.
 func ensureWebhookConfiguration(ctx context.Context, wcClient *client.Client) {
-	err := wcClient.Create(ctx, webhookConfiguration())
-	if err == nil {
-		return
-	}
-	Expect(apierrors.IsAlreadyExists(err)).To(BeTrue(), "failed to create the ValidatingWebhookConfiguration %s: %v", webhookName, err)
-
-	existing := &admissionregistrationv1.ValidatingWebhookConfiguration{}
-	Expect(wcClient.Get(ctx, cr.ObjectKey{Name: webhookName}, existing)).To(Succeed())
-	Expect(existing.Labels[ownerLabelKey]).To(Equal(ownerLabelValue), "the ValidatingWebhookConfiguration %s already exists and is not owned by this suite", webhookName)
+	Eventually(func() error {
+		desired := webhookConfiguration()
+		err := wcClient.Create(ctx, desired)
+		if err == nil || !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+		existing := &admissionregistrationv1.ValidatingWebhookConfiguration{}
+		if err := wcClient.Get(ctx, cr.ObjectKey{Name: webhookName}, existing); err != nil {
+			return err
+		}
+		if existing.Labels[ownerLabelKey] != ownerLabelValue {
+			return StopTrying(fmt.Sprintf("the ValidatingWebhookConfiguration %s already exists and is not owned by this suite", webhookName))
+		}
+		existing.Webhooks = desired.Webhooks
+		return wcClient.Update(ctx, existing)
+	}).
+		WithTimeout(30 * time.Second).
+		WithPolling(time.Second).
+		Should(Succeed())
 }
 
 // deleteWebhookConfiguration removes the suite's ValidatingWebhookConfiguration.
@@ -173,10 +213,11 @@ func webhookCalls(ctx context.Context, wcClient *client.Client) (int, error) {
 	return calls, nil
 }
 
-// webhookReached creates a ConfigMap in webhookNamespace and reports whether
-// the API server's webhook call reached the listener. The exec that reads the
-// count goes through the API server and the kubelet, so it is not subject to
-// the pod's network policy.
+// webhookReached sends a dry-run ConfigMap CREATE to webhookNamespace and
+// reports whether the API server's webhook call reached the listener. Dry run
+// still calls validating webhooks with sideEffects None, and stores nothing.
+// The exec that reads the count goes through the API server and the kubelet,
+// so it is not subject to the pod's network policy.
 func webhookReached(ctx context.Context, wcClient *client.Client) (bool, error) {
 	before, err := webhookCalls(ctx, wcClient)
 	if err != nil {
@@ -184,21 +225,20 @@ func webhookReached(ctx context.Context, wcClient *client.Client) (bool, error) 
 	}
 
 	// Create returns once the API server has called the webhook, or given up
-	// after webhookTimeoutSeconds when the connection is dropped.
+	// after webhookTimeoutSeconds when the connection is dropped. The listener
+	// writes its line before closing the connection, so the count is already
+	// up to date when Create returns.
 	configMap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "webhook-probe-",
 			Namespace:    webhookNamespace,
-			Labels:       map[string]string{ownerLabelKey: ownerLabelValue},
+			Labels:       map[string]string{ownerLabelKey: ownerLabelValue, webhookProbeLabel: "true"},
 		},
 		Data: map[string]string{"probe": "webhook"},
 	}
-	if err := wcClient.Create(ctx, configMap); err != nil {
-		return false, fmt.Errorf("failed to create a ConfigMap in %s: %w", webhookNamespace, err)
+	if err := wcClient.Create(ctx, configMap, cr.DryRunAll); err != nil {
+		return false, fmt.Errorf("failed to dry-run a ConfigMap CREATE in %s: %w", webhookNamespace, err)
 	}
-	// The listener records a connection right after accepting it; give the
-	// write a moment to land.
-	time.Sleep(time.Second)
 
 	after, err := webhookCalls(ctx, wcClient)
 	if err != nil {

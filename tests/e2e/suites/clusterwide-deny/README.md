@@ -33,14 +33,15 @@ without a pod restart, Same-namespace policy, DNS with `allow-dns`,
 in one request.
 
 The webhook spec scopes a `ValidatingWebhookConfiguration` (failurePolicy
-Ignore) to ConfigMap CREATE in its own namespace and points it at a listener
-pod that counts the connections it accepts. A ConfigMap CREATE that adds a
-connection means the API server reached the pod. It starts with the namespace
-opted out as the control.
+Ignore) to labelled probe ConfigMaps in its own namespace and points it at a
+listener pod that counts the connections it accepts. A dry-run ConfigMap CREATE
+that adds a connection means the API server reached the pod. It starts and ends
+with the namespace opted out as the control.
 
-Pending (`PIt`, reason in the spec): `allow-ingress-controller`, `allow-metrics-scraping`, DNS in
-kube-system/giantswarm, `allowDNS` on, deny disabled parity, GS components and
-Cilium health, kyverno-crds install ordering.
+Pending (`PIt`, reason in the spec): `allow-ingress-controller`,
+`allow-metrics-scraping`, DNS in kube-system/giantswarm, `allowDNS` on, deny
+disabled parity, GS components and Cilium health, kyverno-crds install
+ordering.
 
 Negative results only count when a probe times out (packets dropped). Refusals
 and other errors fail loudly. Label changes take up to about a minute to show

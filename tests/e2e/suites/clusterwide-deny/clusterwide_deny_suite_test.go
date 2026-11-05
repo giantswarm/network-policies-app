@@ -285,8 +285,9 @@ func TestClusterwideDeny(t *testing.T) {
 					})
 
 					// Covers the DNS and API server allows. webhook-ingress,
-					// ingress-controller and metrics-scraping are labelled too but
-					// verified by their own specs.
+					// ingress-controller and metrics-scraping are labelled too:
+					// webhook-ingress is verified by its own spec, the other two by
+					// pending specs.
 					It("keeps the DNS and API server allows working when all five allow labels are set in one request", func() {
 						ctx := state.GetContext()
 						wcClient := workloadClusterClient()
@@ -357,6 +358,12 @@ func TestClusterwideDeny(t *testing.T) {
 						By("not reaching it after removing the label")
 						setNamespaceLabels(ctx, wcClient, webhookNamespace, nil, allowWebhookIngressLabel)
 						expectWebhook(ctx, wcClient, false, labelTimeout)
+
+						// Proves the listener still answers, so the last blocked
+						// result came from the policy.
+						By("reaching it again after opting the namespace out (control)")
+						setNamespaceLabels(ctx, wcClient, webhookNamespace, map[string]string{optOutLabelKey: "false"})
+						expectWebhook(ctx, wcClient, true, labelTimeout)
 					})
 
 					PIt("grants ingress from the ingress controller with allow-ingress-controller", func() {
@@ -388,7 +395,7 @@ func TestClusterwideDeny(t *testing.T) {
 		AfterSuite(func() {
 			cluster := state.GetCluster()
 			if cluster == nil {
-				logger.Log("Skipping namespace cleanup, no cluster in state")
+				logger.Log("Skipping cleanup (namespaces, webhook configuration), no cluster in state")
 				return
 			}
 
@@ -396,7 +403,7 @@ func TestClusterwideDeny(t *testing.T) {
 			wcClient, err := state.GetFramework().WC(cluster.Name)
 			if err != nil {
 				// The workload cluster is about to be deleted anyway.
-				logger.Log("Skipping namespace cleanup, no workload cluster client: %s", err)
+				logger.Log("Skipping cleanup (namespaces, webhook configuration), no workload cluster client: %s", err)
 				return
 			}
 

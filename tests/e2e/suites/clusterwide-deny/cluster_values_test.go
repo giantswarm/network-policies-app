@@ -83,6 +83,30 @@ func setClusterWideDeny(ctx context.Context, enabled bool) error {
 	return nil
 }
 
+// clusterUsesProxy reports whether the cluster values set
+// global.connectivity.proxy.enabled, i.e. the cluster reaches the internet
+// through an HTTP proxy and direct egress may be dropped.
+func clusterUsesProxy(ctx context.Context) (bool, error) {
+	cluster := state.GetCluster()
+	key := types.NamespacedName{
+		Name:      fmt.Sprintf("%s-userconfig", cluster.ClusterApp.InstallName),
+		Namespace: cluster.ClusterApp.GetNamespace(),
+	}
+	cm := &corev1.ConfigMap{}
+	if err := state.GetFramework().MC().Get(ctx, key, cm); err != nil {
+		return false, fmt.Errorf("failed to get the cluster values %s: %w", key, err)
+	}
+	values := map[string]any{}
+	if err := yaml.Unmarshal([]byte(cm.Data[clusterValuesDataKey]), &values); err != nil {
+		return false, fmt.Errorf("failed to parse the cluster values in %s: %w", key, err)
+	}
+	enabled, _, err := unstructured.NestedBool(values, "global", "connectivity", "proxy", "enabled")
+	if err != nil {
+		return false, fmt.Errorf("unexpected global.connectivity.proxy.enabled in the cluster values %s: %w", key, err)
+	}
+	return enabled, nil
+}
+
 // clusterWideDenyPolicyExists reports whether the chart's clusterwide deny
 // CCNP exists in the workload cluster.
 func clusterWideDenyPolicyExists(ctx context.Context) (bool, error) {

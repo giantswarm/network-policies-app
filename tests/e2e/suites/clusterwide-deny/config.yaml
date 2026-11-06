@@ -3,7 +3,12 @@
 appName: network-policies
 repoName: network-policies-app
 appCatalog: cluster
-# Widens to all providers (PRD rung 1) once each has been run. AKS also needs
+# Widens to all providers (PRD rung 1) one at a time, each in its own PR that
+# only merges once the suite is green on that provider there: every provider
+# listed here is a required check on every PR. AKS also needs
 # standardAllows.webhookIngress.fromEntities: [cluster] (giantswarm/roadmap#4341).
 providers:
 - capa
+- capz
+- capv
+- capvcd

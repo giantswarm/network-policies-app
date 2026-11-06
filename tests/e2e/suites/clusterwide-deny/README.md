@@ -8,13 +8,16 @@ pods, not on rendered manifests.
 
 ## Status
 
-Green on CAPA with the clusterwide deny (giantswarm/roadmap#4340) and the
-label-selected standard allows (giantswarm/roadmap#4376) in the chart. It runs
-on CAPA only so far: the other providers have not been run yet, and AKS also
-needs `standardAllows.webhookIngress.fromEntities: [cluster]` from its cluster
-values (giantswarm/roadmap#4341). The specs run in an `Ordered` container, so
-after the first failure the rest are skipped. Do not wire it into a required
-check before it is green on every provider.
+Runs with the clusterwide deny (giantswarm/roadmap#4340) and the label-selected
+standard allows (giantswarm/roadmap#4376) in the chart, on CAPA (`capa`), CAPZ
+(`capz`, cluster-azure), CAPV (`capv`, cluster-vsphere) and CAPVCD (`capvcd`,
+cluster-cloud-director). The other providers are added one at a time, each in
+its own PR that only merges once the suite is green on that provider there:
+every provider in `config.yaml` becomes a required check on every PR (Heimdall).
+AKS (`aks`, cluster-aks) is a separate provider from CAPZ and also needs
+`standardAllows.webhookIngress.fromEntities: [cluster]` from its cluster values
+(giantswarm/roadmap#4341). The specs run in an `Ordered` container, so after the
+first failure the rest are skipped.
 
 The cluster is created with the clusterwide deny off. A deny from the cluster's
 first minute stops Kyverno from installing (its jobs cannot reach the API
@@ -27,10 +30,13 @@ AfterSuite turns it off again before the cluster is deleted, so uninstall hooks
 can still reach the API server.
 
 Implemented specs: cross-namespace deny, internet blocked (skipped when the
-opted-out control cannot reach the internet itself), live opt-out label flip
-without a pod restart, Same-namespace policy, DNS with `allow-dns`,
-`allow-kube-apiserver`, `allow-webhook-ingress`, and all five allow labels set
-in one request.
+opted-out control has no direct internet egress: its connection is refused or
+unreachable, or it keeps timing out for 50s on a cluster whose values set
+`global.connectivity.proxy.enabled`, like the CAPVCD test environment; there it
+cannot detect a broken opt-out, which the live label flip and cross-namespace
+specs still cover), live opt-out label flip without a pod restart,
+Same-namespace policy, DNS with `allow-dns`, `allow-kube-apiserver`,
+`allow-webhook-ingress`, and all five allow labels set in one request.
 
 The webhook spec scopes a `ValidatingWebhookConfiguration` (failurePolicy
 Ignore) to labelled probe ConfigMaps in its own namespace and points it at a

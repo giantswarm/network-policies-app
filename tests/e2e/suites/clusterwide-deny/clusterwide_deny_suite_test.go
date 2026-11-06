@@ -129,32 +129,43 @@ func TestClusterwideDeny(t *testing.T) {
 						ensureNamespace(ctx, wcClient, deniedNamespace, nil)
 						ensureProbePod(ctx, wcClient, deniedNamespace)
 
+						// A proxy-only cluster (global.connectivity.proxy.enabled in
+						// its values, e.g. the CAPVCD test environment) may silently
+						// drop direct egress, which looks the same as a deny.
+						proxyOnly, err := clusterUsesProxy(ctx)
+						Expect(err).NotTo(HaveOccurred())
+
 						// The control proves the cluster has direct egress. An opted-out
-						// namespace has no deny, so a timeout there is a failure. A
-						// refusal or unreachable network is what a proxy-only cluster
-						// gives: skip, since a blocked result would prove nothing. Any
-						// other error (exec, unknown output) is retried and fails the
-						// spec if it persists, so it can never turn into a skip.
+						// namespace has no deny, so a timeout there is a failure, unless
+						// the cluster is proxy-only. A refusal or unreachable network
+						// means no direct egress either. Both skip, since a blocked
+						// result would prove nothing. Any other error (exec, unknown
+						// output) is retried and fails the spec if it persists, so it
+						// can never turn into a skip.
 						By("reaching the internet from the opted-out namespace (control)")
-						const noRoute = "no-route"
-						var noRouteErr error
+						const noDirectEgress = "no-direct-egress"
+						var noDirectEgressReason string
 						Eventually(func() (string, error) {
-							noRouteErr = nil
+							noDirectEgressReason = ""
 							result, err := probeHTTP(ctx, wcClient, controlNamespace, internet)
 							if errors.Is(err, errNoRoute) {
-								noRouteErr = err
-								return noRoute, nil
+								noDirectEgressReason = err.Error()
+								return noDirectEgress, nil
 							}
 							if err != nil {
 								return "", err
+							}
+							if result == outcomeTimeout && proxyOnly {
+								noDirectEgressReason = "the connection timed out and the cluster values set global.connectivity.proxy.enabled"
+								return noDirectEgress, nil
 							}
 							return string(result), nil
 						}).
 							WithTimeout(time.Minute).
 							WithPolling(10*time.Second).
-							Should(Or(Equal(string(outcomeReachable)), Equal(noRoute)), "the opted-out control did not reach %s: opted-out namespaces must have egress", internet)
-						if noRouteErr != nil {
-							Skip(fmt.Sprintf("the opted-out control has no route to %s: the cluster has no direct internet egress, so a blocked result would prove nothing (%v)", internet, noRouteErr))
+							Should(Or(Equal(string(outcomeReachable)), Equal(noDirectEgress)), "the opted-out control did not reach %s: opted-out namespaces must have egress", internet)
+						if noDirectEgressReason != "" {
+							Skip(fmt.Sprintf("the opted-out control cannot reach %s directly: the cluster has no direct internet egress, so a blocked result would prove nothing (%s)", internet, noDirectEgressReason))
 						}
 
 						By("not reaching the internet from the unlabeled namespace")

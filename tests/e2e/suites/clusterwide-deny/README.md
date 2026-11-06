@@ -30,10 +30,12 @@ AfterSuite turns it off again before the cluster is deleted, so uninstall hooks
 can still reach the API server.
 
 Implemented specs: cross-namespace deny, internet blocked (skipped when the
-opted-out control cannot reach the internet itself), live opt-out label flip
-without a pod restart, Same-namespace policy, DNS with `allow-dns`,
-`allow-kube-apiserver`, `allow-webhook-ingress`, and all five allow labels set
-in one request.
+opted-out control has no direct internet egress: its connection is refused or
+unreachable, or it times out on a cluster whose values set
+`global.connectivity.proxy.enabled`, like the CAPVCD test environment), live
+opt-out label flip without a pod restart, Same-namespace policy, DNS with
+`allow-dns`, `allow-kube-apiserver`, `allow-webhook-ingress`, and all five allow
+labels set in one request.
 
 The webhook spec scopes a `ValidatingWebhookConfiguration` (failurePolicy
 Ignore) to labelled probe ConfigMaps in its own namespace and points it at a

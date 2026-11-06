@@ -29,9 +29,12 @@ network-policies values in the cluster app's user config
 AfterSuite turns it off again before the cluster is deleted, so uninstall hooks
 can still reach the API server.
 
-Implemented specs: cross-namespace deny, internet blocked (skipped when the
-opted-out control has no direct internet egress: its connection is refused or
-unreachable, or it keeps timing out for 50s on a cluster whose values set
+Implemented specs: deny disabled parity (before the deny is turned on: no
+clusterwide deny, the per-namespace `default-deny-all` in kube-system and
+giantswarm, unlabeled customer namespaces reach each other, DNS and the API
+server), cross-namespace deny, internet blocked (skipped when the opted-out
+control has no direct internet egress: its connection is refused or unreachable,
+or it keeps timing out for 50s on a cluster whose values set
 `global.connectivity.proxy.enabled`, like the CAPVCD test environment; there it
 cannot detect a broken opt-out, which the live label flip and cross-namespace
 specs still cover), live opt-out label flip without a pod restart,
@@ -45,9 +48,8 @@ that adds a connection means the API server reached the pod. It starts and ends
 with the namespace opted out as the control.
 
 Pending (`PIt`, reason in the spec): `allow-ingress-controller`,
-`allow-metrics-scraping`, DNS in kube-system/giantswarm, `allowDNS` on, deny
-disabled parity, GS components and Cilium health, kyverno-crds install
-ordering.
+`allow-metrics-scraping`, DNS in kube-system/giantswarm, `allowDNS` on, GS
+components and Cilium health, kyverno-crds install ordering.
 
 Negative results only count when a probe times out (packets dropped). Refusals
 and other errors fail loudly. Label changes take up to about a minute to show

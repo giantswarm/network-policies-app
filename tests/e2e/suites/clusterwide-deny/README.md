@@ -23,13 +23,15 @@ spec.
 
 The cluster is created with the clusterwide deny off. A deny from the cluster's
 first minute stops Kyverno from installing (its jobs cannot reach the API
-server), so the default apps never become ready and no spec runs. A `BeforeAll` in
-the connectivity specs turns the deny on for the running cluster through the
+server), so the default apps never become ready and no spec runs. A `BeforeAll`
+in the connectivity specs turns the deny on for the running cluster through the
 network-policies values in the cluster app's user config
 (`global.apps.networkPolicies.values`), the way a customer would, and waits for
 `default-deny-all-namespaces` to exist and the HelmRelease to settle. The
 AfterSuite turns it off again before the cluster is deleted, so uninstall hooks
-can still reach the API server.
+can still reach the API server. The `allowDNS` spec flips
+`denyByDefault.clusterWide.allowDNS.enabled` on and off again the same way,
+which adds two reconcile round trips (a few minutes) to every run.
 
 Implemented specs: deny disabled parity (before the deny is turned on: no
 clusterwide deny, the per-namespace `default-deny-all` in kube-system and
@@ -40,7 +42,8 @@ or it keeps timing out for 50s on a cluster whose values set
 `global.connectivity.proxy.enabled`, like the CAPVCD test environment; there it
 cannot detect a broken opt-out, which the live label flip and cross-namespace
 specs still cover), live opt-out label flip without a pod restart,
-Same-namespace policy, DNS with `allow-dns`, `allow-kube-apiserver`,
+Same-namespace policy, DNS with `allow-dns`, DNS with `allowDNS` on (turned on
+and off again through the cluster values), `allow-kube-apiserver`,
 `allow-webhook-ingress`, and all five allow labels set in one request.
 
 The webhook spec scopes a `ValidatingWebhookConfiguration` (failurePolicy
@@ -50,8 +53,8 @@ that adds a connection means the API server reached the pod. It starts and ends
 with the namespace opted out as the control.
 
 Pending (`PIt`, reason in the spec): `allow-ingress-controller`,
-`allow-metrics-scraping`, DNS in kube-system/giantswarm, `allowDNS` on, GS
-components and Cilium health, kyverno-crds install ordering.
+`allow-metrics-scraping`, DNS in kube-system/giantswarm (allowDNS off and on),
+GS components and Cilium health, kyverno-crds install ordering.
 
 Negative results only count when a probe times out (packets dropped). Refusals
 and other errors fail loudly. Label changes take up to about a minute to show

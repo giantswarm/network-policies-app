@@ -331,25 +331,23 @@ func TestClusterwideDeny(t *testing.T) {
 						ensureNamespace(ctx, wcClient, allowDNSNamespace, nil)
 						ensureProbePod(ctx, wcClient, allowDNSNamespace)
 
-						// Back to the shipped default (off) for the later specs, also
-						// when this one fails half way.
-						DeferCleanup(func() {
-							disableClusterWideAllowDNS(ctx)
-						})
-
+						// No cleanup on failure: the Ordered container skips the later
+						// specs anyway, and the DNS allow only renders while the deny is
+						// on, which the AfterSuite turns off.
 						By("not resolving a cluster name while allowDNS is off (the default)")
+						exists, err := clusterWidePolicyExists(ctx, allowDNSPolicyName)
+						Expect(err).NotTo(HaveOccurred())
+						Expect(exists).To(BeFalse(), "the CiliumClusterwideNetworkPolicy %s exists although allowDNS is off by default", allowDNSPolicyName)
 						expectDNSBlocked(ctx, wcClient, allowDNSNamespace, 3*time.Minute)
 
 						By("resolving it after turning allowDNS on, without any allow label")
 						Expect(setClusterWideAllowDNS(ctx, true)).To(Succeed())
-						allowDNSEnabled = true
-						expectClusterwidePolicy(ctx, allowDNSPolicyName, true)
+						expectClusterWidePolicy(ctx, allowDNSPolicyName, true)
 						expectDNS(ctx, wcClient, allowDNSNamespace, true, labelTimeout)
 
-						By("not resolving it after turning allowDNS off again")
+						By("not resolving it after turning allowDNS off again, back to the default for the later specs")
 						Expect(setClusterWideAllowDNS(ctx, false)).To(Succeed())
-						expectClusterwidePolicy(ctx, allowDNSPolicyName, false)
-						allowDNSEnabled = false
+						expectClusterWidePolicy(ctx, allowDNSPolicyName, false)
 						expectDNSBlocked(ctx, wcClient, allowDNSNamespace, labelTimeout)
 					})
 

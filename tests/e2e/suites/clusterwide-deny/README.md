@@ -23,13 +23,15 @@ spec.
 
 The cluster is created with the clusterwide deny off. A deny from the cluster's
 first minute stops Kyverno from installing (its jobs cannot reach the API
-server), so the default apps never become ready and no spec runs. A `BeforeAll` in
-the connectivity specs turns the deny on for the running cluster through the
+server), so the default apps never become ready and no spec runs. A `BeforeAll`
+in the connectivity specs turns the deny on for the running cluster through the
 network-policies values in the cluster app's user config
 (`global.apps.networkPolicies.values`), the way a customer would, and waits for
 `default-deny-all-namespaces` to exist and the HelmRelease to settle. The
 AfterSuite turns it off again before the cluster is deleted, so uninstall hooks
-can still reach the API server.
+can still reach the API server. The `allowDNS` spec flips
+`denyByDefault.clusterWide.allowDNS.enabled` on and off again the same way,
+which adds two reconcile round trips (a few minutes) to every run.
 
 Implemented specs: deny disabled parity (before the deny is turned on: no
 clusterwide deny, the per-namespace `default-deny-all` in kube-system and

@@ -58,9 +58,9 @@ func setClusterWideAllowDNS(ctx context.Context, enabled bool) error {
 	return setNetworkPoliciesValue(ctx, enabled, "denyByDefault", "clusterWide", "allowDNS", "enabled")
 }
 
-// setNetworkPoliciesValue sets one network-policies value in the cluster app's
+// setNetworkPoliciesValue sets one boolean network-policies value in the cluster app's
 // user config, at networkPoliciesValuesPath plus field.
-func setNetworkPoliciesValue(ctx context.Context, value any, field ...string) error {
+func setNetworkPoliciesValue(ctx context.Context, value bool, field ...string) error {
 	cluster := state.GetCluster()
 	key := types.NamespacedName{
 		Name:      fmt.Sprintf("%s-userconfig", cluster.ClusterApp.InstallName),
@@ -148,12 +148,12 @@ func clusterUsesProxy(ctx context.Context) (bool, error) {
 // clusterWideDenyPolicyExists reports whether the chart's clusterwide deny
 // CCNP exists in the workload cluster.
 func clusterWideDenyPolicyExists(ctx context.Context) (bool, error) {
-	return clusterwidePolicyExists(ctx, clusterWideDenyPolicyName)
+	return clusterWidePolicyExists(ctx, clusterWideDenyPolicyName)
 }
 
-// clusterwidePolicyExists reports whether the named
+// clusterWidePolicyExists reports whether the named
 // CiliumClusterwideNetworkPolicy exists in the workload cluster.
-func clusterwidePolicyExists(ctx context.Context, name string) (bool, error) {
+func clusterWidePolicyExists(ctx context.Context, name string) (bool, error) {
 	policy := &unstructured.Unstructured{}
 	policy.SetAPIVersion("cilium.io/v2")
 	policy.SetKind("CiliumClusterwideNetworkPolicy")
@@ -164,16 +164,16 @@ func clusterwidePolicyExists(ctx context.Context, name string) (bool, error) {
 	return err == nil, err
 }
 
-// expectClusterwidePolicy waits until the named CCNP exists (present) or is
+// expectClusterWidePolicy waits until the named CCNP exists (present) or is
 // gone, then until the network-policies HelmRelease has settled on the new
 // values, and checks that the state holds for a minute after that, so an
 // upgrade that is rolled back cannot pass.
-func expectClusterwidePolicy(ctx context.Context, name string, present bool) {
+func expectClusterWidePolicy(ctx context.Context, name string, present bool) {
 	change := "appear"
 	if !present {
 		change = "go away"
 	}
-	Eventually(func() (bool, error) { return clusterwidePolicyExists(ctx, name) }).
+	Eventually(func() (bool, error) { return clusterWidePolicyExists(ctx, name) }).
 		WithTimeout(15*time.Minute).
 		WithPolling(15*time.Second).
 		Should(Equal(present), "the CiliumClusterwideNetworkPolicy %s did not %s after changing the cluster values", name, change)
@@ -183,7 +183,7 @@ func expectClusterwidePolicy(ctx context.Context, name string, present bool) {
 		WithPolling(15*time.Second).
 		Should(Succeed(), "the network-policies HelmRelease did not settle after changing the cluster values")
 
-	Consistently(func() (bool, error) { return clusterwidePolicyExists(ctx, name) }).
+	Consistently(func() (bool, error) { return clusterWidePolicyExists(ctx, name) }).
 		WithTimeout(time.Minute).
 		WithPolling(15*time.Second).
 		Should(Equal(present), "the CiliumClusterwideNetworkPolicy %s changed again after the HelmRelease settled", name)
@@ -195,7 +195,7 @@ func expectClusterwidePolicy(ctx context.Context, name string, present bool) {
 // have to reconcile first. Waiting for the HelmRelease too catches an upgrade
 // that renders the CCNP and is then rolled back.
 func expectClusterWideDenyPolicy(ctx context.Context) {
-	expectClusterwidePolicy(ctx, clusterWideDenyPolicyName, true)
+	expectClusterWidePolicy(ctx, clusterWideDenyPolicyName, true)
 }
 
 // networkPoliciesReleaseSettled returns nil when the network-policies
@@ -227,24 +227,6 @@ func networkPoliciesReleaseSettled(ctx context.Context) error {
 // allowDNSPolicyName is the CCNP the chart renders when
 // denyByDefault.clusterWide.allowDNS.enabled and the clusterwide deny are on.
 const allowDNSPolicyName = "allow-dns-all-namespaces"
-
-// allowDNSEnabled records that a spec turned the clusterwide DNS allow on and
-// has not turned it off again yet.
-var allowDNSEnabled bool
-
-// disableClusterWideAllowDNS turns the clusterwide DNS allow off again after a
-// spec that failed half way, so later specs see the shipped default (off).
-func disableClusterWideAllowDNS(ctx context.Context) {
-	if !allowDNSEnabled {
-		return
-	}
-	if err := setClusterWideAllowDNS(ctx, false); err != nil {
-		logger.Log("Could not turn the clusterwide DNS allow off: %s", err)
-		return
-	}
-	expectClusterwidePolicy(ctx, allowDNSPolicyName, false)
-	allowDNSEnabled = false
-}
 
 // denyEnabled records that the suite turned the deny on, so teardown only
 // turns it off when there is something to undo.

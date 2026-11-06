@@ -88,16 +88,19 @@ func TestClusterwideDeny(t *testing.T) {
 				// Runs before "connectivity", whose BeforeAll turns the deny on:
 				// the cluster is created with the clusterwide deny off, which is
 				// the shipped default.
-				Describe("deny disabled", Ordered, func() {
+				Describe("deny disabled", func() {
 					It("matches today's behaviour when the clusterwide deny is disabled (per-namespace default-deny-all in kube-system/giantswarm, customer namespaces unaffected)", func() {
 						ctx := state.GetContext()
 						wcClient := workloadClusterClient()
 
+						DeferCleanup(func() {
+							deleteNamespaces(ctx, wcClient, paritySourceNamespace, parityTargetNamespace)
+						})
+
 						By("not rendering the clusterwide deny")
-						Consistently(func() (bool, error) { return clusterWideDenyPolicyExists(ctx) }).
-							WithTimeout(30*time.Second).
-							WithPolling(10*time.Second).
-							Should(BeFalse(), "the CiliumClusterwideNetworkPolicy %s exists although denyByDefault.clusterWide.enabled is false", clusterWideDenyPolicyName)
+						exists, err := clusterWideDenyPolicyExists(ctx)
+						Expect(err).NotTo(HaveOccurred())
+						Expect(exists).To(BeFalse(), "the CiliumClusterwideNetworkPolicy %s exists although denyByDefault.clusterWide.enabled is false", clusterWideDenyPolicyName)
 
 						By("keeping the per-namespace default-deny-all in kube-system and giantswarm")
 						for _, namespace := range perNamespaceDenyNamespaces {

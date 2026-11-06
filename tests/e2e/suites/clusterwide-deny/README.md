@@ -17,7 +17,9 @@ every provider in `config.yaml` becomes a required check on every PR (Heimdall).
 AKS (`aks`, cluster-aks) is a separate provider from CAPZ and also needs
 `standardAllows.webhookIngress.fromEntities: [cluster]` from its cluster values
 (giantswarm/roadmap#4341). The specs run in an `Ordered` container, so after the
-first failure the rest are skipped.
+first failure the rest are skipped. That includes the deny disabled parity spec:
+it runs first, while the deny is still off, so a failure there skips every deny
+spec.
 
 The cluster is created with the clusterwide deny off. A deny from the cluster's
 first minute stops Kyverno from installing (its jobs cannot reach the API
@@ -63,7 +65,7 @@ dropped DNS query.
 
 ## Layout
 
-- `clusterwide_deny_suite_test.go` the suite: the install check, then the connectivity specs.
+- `clusterwide_deny_suite_test.go` the suite: the install check, the deny disabled parity spec, then the connectivity specs.
 - `probe_test.go` reusable helpers: namespaces and label changes,
   probe and listener pods, HTTP and DNS reachability assertions, the
   Same-namespace policy.

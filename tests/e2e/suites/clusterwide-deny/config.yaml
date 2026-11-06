@@ -10,3 +10,4 @@ appCatalog: cluster
 providers:
 - capa
 - capz
+- capv

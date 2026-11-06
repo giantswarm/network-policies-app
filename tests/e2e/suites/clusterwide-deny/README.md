@@ -31,11 +31,12 @@ can still reach the API server.
 
 Implemented specs: cross-namespace deny, internet blocked (skipped when the
 opted-out control has no direct internet egress: its connection is refused or
-unreachable, or it times out on a cluster whose values set
-`global.connectivity.proxy.enabled`, like the CAPVCD test environment), live
-opt-out label flip without a pod restart, Same-namespace policy, DNS with
-`allow-dns`, `allow-kube-apiserver`, `allow-webhook-ingress`, and all five allow
-labels set in one request.
+unreachable, or it keeps timing out for 50s on a cluster whose values set
+`global.connectivity.proxy.enabled`, like the CAPVCD test environment; there it
+cannot detect a broken opt-out, which the live label flip and cross-namespace
+specs still cover), live opt-out label flip without a pod restart,
+Same-namespace policy, DNS with `allow-dns`, `allow-kube-apiserver`,
+`allow-webhook-ingress`, and all five allow labels set in one request.
 
 The webhook spec scopes a `ValidatingWebhookConfiguration` (failurePolicy
 Ignore) to labelled probe ConfigMaps in its own namespace and points it at a

@@ -17,7 +17,9 @@ every provider in `config.yaml` becomes a required check on every PR (Heimdall).
 AKS (`aks`, cluster-aks) is a separate provider from CAPZ and also needs
 `standardAllows.webhookIngress.fromEntities: [cluster]` from its cluster values
 (giantswarm/roadmap#4341). The specs run in an `Ordered` container, so after the
-first failure the rest are skipped.
+first failure the rest are skipped. That includes the deny disabled parity spec:
+it runs first, while the deny is still off, so a failure there skips every deny
+spec.
 
 The cluster is created with the clusterwide deny off. A deny from the cluster's
 first minute stops Kyverno from installing (its jobs cannot reach the API
@@ -29,9 +31,12 @@ network-policies values in the cluster app's user config
 AfterSuite turns it off again before the cluster is deleted, so uninstall hooks
 can still reach the API server.
 
-Implemented specs: cross-namespace deny, internet blocked (skipped when the
-opted-out control has no direct internet egress: its connection is refused or
-unreachable, or it keeps timing out for 50s on a cluster whose values set
+Implemented specs: deny disabled parity (before the deny is turned on: no
+clusterwide deny, the per-namespace `default-deny-all` in kube-system and
+giantswarm, unlabeled customer namespaces reach each other, DNS and the API
+server), cross-namespace deny, internet blocked (skipped when the opted-out
+control has no direct internet egress: its connection is refused or unreachable,
+or it keeps timing out for 50s on a cluster whose values set
 `global.connectivity.proxy.enabled`, like the CAPVCD test environment; there it
 cannot detect a broken opt-out, which the live label flip and cross-namespace
 specs still cover), live opt-out label flip without a pod restart,
@@ -45,9 +50,8 @@ that adds a connection means the API server reached the pod. It starts and ends
 with the namespace opted out as the control.
 
 Pending (`PIt`, reason in the spec): `allow-ingress-controller`,
-`allow-metrics-scraping`, DNS in kube-system/giantswarm, `allowDNS` on, deny
-disabled parity, GS components and Cilium health, kyverno-crds install
-ordering.
+`allow-metrics-scraping`, DNS in kube-system/giantswarm, `allowDNS` on, GS
+components and Cilium health, kyverno-crds install ordering.
 
 Negative results only count when a probe times out (packets dropped). Refusals
 and other errors fail loudly. Label changes take up to about a minute to show
@@ -61,7 +65,7 @@ dropped DNS query.
 
 ## Layout
 
-- `clusterwide_deny_suite_test.go` the suite: the install check, then the connectivity specs.
+- `clusterwide_deny_suite_test.go` the suite: the install check, the deny disabled parity spec, then the connectivity specs.
 - `probe_test.go` reusable helpers: namespaces and label changes,
   probe and listener pods, HTTP and DNS reachability assertions, the
   Same-namespace policy.

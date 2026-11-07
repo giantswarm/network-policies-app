@@ -37,6 +37,11 @@ const (
 	allAllowsNamespace     = "cwd-e2e-allallows"
 	webhookNamespace       = "cwd-e2e-webhook"
 
+	// Unlabeled namespaces for the deny-disabled spec, which runs before the
+	// deny is turned on.
+	paritySourceNamespace = "cwd-e2e-parity-src"
+	parityTargetNamespace = "cwd-e2e-parity-dst"
+
 	// internetHost is a public HTTPS address, probed by IP so DNS plays no
 	// part.
 	internetHost = "1.1.1.1"
@@ -78,6 +83,41 @@ func TestClusterwideDeny(t *testing.T) {
 						WithTimeout(5 * time.Minute).
 						WithPolling(15 * time.Second).
 						Should(BeTrue())
+				})
+
+				// Runs before "connectivity", whose BeforeAll turns the deny on:
+				// the cluster is created with the clusterwide deny off, which is
+				// the shipped default.
+				Describe("deny disabled", func() {
+					It("matches today's behaviour when the clusterwide deny is disabled (per-namespace default-deny-all in kube-system/giantswarm, customer namespaces unaffected)", func() {
+						ctx := state.GetContext()
+						wcClient := workloadClusterClient()
+
+						DeferCleanup(func() {
+							deleteNamespaces(ctx, wcClient, paritySourceNamespace, parityTargetNamespace)
+						})
+
+						By("not rendering the clusterwide deny")
+						exists, err := clusterWideDenyPolicyExists(ctx)
+						Expect(err).NotTo(HaveOccurred())
+						Expect(exists).To(BeFalse(), "the CiliumClusterwideNetworkPolicy %s exists although denyByDefault.clusterWide.enabled is false", clusterWideDenyPolicyName)
+
+						By("keeping the per-namespace default-deny-all in kube-system and giantswarm")
+						for _, namespace := range perNamespaceDenyNamespaces {
+							expectPerNamespaceDenyPolicies(ctx, wcClient, namespace)
+						}
+
+						By("leaving traffic between unlabeled customer namespaces open")
+						ensureNamespace(ctx, wcClient, parityTargetNamespace, nil)
+						target := ensureListenerPod(ctx, wcClient, parityTargetNamespace)
+						ensureNamespace(ctx, wcClient, paritySourceNamespace, nil)
+						ensureProbePod(ctx, wcClient, paritySourceNamespace)
+						expectReachability(ctx, wcClient, paritySourceNamespace, target, true)
+
+						By("resolving DNS and reaching the API server from an unlabeled customer namespace")
+						expectDNS(ctx, wcClient, paritySourceNamespace, true, time.Minute)
+						expectReachability(ctx, wcClient, paritySourceNamespace, kubernetesServiceTarget(ctx, wcClient), true)
+					})
 				})
 
 				Describe("connectivity", Ordered, func() {
@@ -397,12 +437,6 @@ func TestClusterwideDeny(t *testing.T) {
 						// Needs a Giant Swarm metrics scraper on the cluster.
 					})
 
-					PIt("matches today's behaviour when the clusterwide deny is disabled (per-namespace default-deny-all in kube-system/giantswarm, customer namespaces unaffected)", func() {
-						// The cluster now starts with the deny off, so this could run
-						// in a container before "connectivity", whose BeforeAll turns
-						// the deny on.
-					})
-
 					PIt("keeps Giant Swarm components healthy and Cilium reporting healthy with the clusterwide deny on", func() {
 						// Needs a per-provider list of GS components to check, plus the
 						// Cilium agent health.
@@ -436,7 +470,8 @@ func TestClusterwideDeny(t *testing.T) {
 
 			deleteWebhookConfiguration(ctx, wcClient)
 			deleteNamespaces(ctx, wcClient, deniedNamespace, controlNamespace, targetNamespace,
-				sameNamespaceNamespace, dnsNamespace, apiServerNamespace, allAllowsNamespace, webhookNamespace)
+				sameNamespaceNamespace, dnsNamespace, apiServerNamespace, allAllowsNamespace, webhookNamespace,
+				paritySourceNamespace, parityTargetNamespace)
 		}).
 		Run(t, "Clusterwide Deny Test")
 }

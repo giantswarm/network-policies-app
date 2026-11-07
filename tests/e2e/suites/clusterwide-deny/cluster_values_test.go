@@ -9,9 +9,11 @@ import (
 
 	helmv2 "github.com/fluxcd/helm-controller/api/v2"
 	"github.com/giantswarm/apptest-framework/v5/pkg/state"
+	"github.com/giantswarm/clustertest/v5/pkg/client"
 	"github.com/giantswarm/clustertest/v5/pkg/logger"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -81,6 +83,28 @@ func setClusterWideDeny(ctx context.Context, enabled bool) error {
 		return fmt.Errorf("failed to set the clusterwide deny in the cluster values %s: %w", key, err)
 	}
 	return nil
+}
+
+// perNamespaceDenyNamespaces are the chart's default denyByDefault.namespaces:
+// while the clusterwide deny is off, each gets a default-deny-all
+// CiliumNetworkPolicy and NetworkPolicy.
+var perNamespaceDenyNamespaces = []string{"kube-system", "giantswarm"}
+
+// perNamespaceDenyPolicyName is the name of both per-namespace deny policies.
+const perNamespaceDenyPolicyName = "default-deny-all"
+
+// expectPerNamespaceDenyPolicies asserts that the namespace holds the chart's
+// default-deny-all CiliumNetworkPolicy and NetworkPolicy.
+func expectPerNamespaceDenyPolicies(ctx context.Context, wcClient *client.Client, namespace string) {
+	key := types.NamespacedName{Namespace: namespace, Name: perNamespaceDenyPolicyName}
+
+	cnp := &unstructured.Unstructured{}
+	cnp.SetAPIVersion("cilium.io/v2")
+	cnp.SetKind("CiliumNetworkPolicy")
+	Expect(wcClient.Get(ctx, key, cnp)).To(Succeed(), "expected the CiliumNetworkPolicy %s while the clusterwide deny is off", key)
+
+	np := &networkingv1.NetworkPolicy{}
+	Expect(wcClient.Get(ctx, key, np)).To(Succeed(), "expected the NetworkPolicy %s while the clusterwide deny is off", key)
 }
 
 // clusterUsesProxy reports whether the cluster values set

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-09
+
 ### Added
 
 - Add `denyByDefault.clusterWide` to replace the per-namespace default deny with a single clusterwide policy, with the namespace opt-out label `policy.giantswarm.io/default-deny: "false"`.
@@ -120,7 +122,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - changed: `app.giantswarm.io` label group was changed to `application.giantswarm.io`
 
-[Unreleased]: https://github.com/giantswarm/network-policies-app/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/giantswarm/network-policies-app/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/giantswarm/network-policies-app/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/giantswarm/network-policies-app/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/giantswarm/network-policies-app/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/giantswarm/network-policies-app/compare/v0.3.1...v0.3.2

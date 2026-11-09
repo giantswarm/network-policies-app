@@ -36,6 +36,12 @@ const (
 	apiServerNamespace     = "cwd-e2e-apiserver"
 	allAllowsNamespace     = "cwd-e2e-allallows"
 	webhookNamespace       = "cwd-e2e-webhook"
+	allowDNSNamespace      = "cwd-e2e-allowdns"
+
+	// Unlabeled namespaces for the deny-disabled spec, which runs before the
+	// deny is turned on.
+	paritySourceNamespace = "cwd-e2e-parity-src"
+	parityTargetNamespace = "cwd-e2e-parity-dst"
 
 	// internetHost is a public HTTPS address, probed by IP so DNS plays no
 	// part.
@@ -78,6 +84,41 @@ func TestClusterwideDeny(t *testing.T) {
 						WithTimeout(5 * time.Minute).
 						WithPolling(15 * time.Second).
 						Should(BeTrue())
+				})
+
+				// Runs before "connectivity", whose BeforeAll turns the deny on:
+				// the cluster is created with the clusterwide deny off, which is
+				// the shipped default.
+				Describe("deny disabled", func() {
+					It("matches today's behaviour when the clusterwide deny is disabled (per-namespace default-deny-all in kube-system/giantswarm, customer namespaces unaffected)", func() {
+						ctx := state.GetContext()
+						wcClient := workloadClusterClient()
+
+						DeferCleanup(func() {
+							deleteNamespaces(ctx, wcClient, paritySourceNamespace, parityTargetNamespace)
+						})
+
+						By("not rendering the clusterwide deny")
+						exists, err := clusterWideDenyPolicyExists(ctx)
+						Expect(err).NotTo(HaveOccurred())
+						Expect(exists).To(BeFalse(), "the CiliumClusterwideNetworkPolicy %s exists although denyByDefault.clusterWide.enabled is false", clusterWideDenyPolicyName)
+
+						By("keeping the per-namespace default-deny-all in kube-system and giantswarm")
+						for _, namespace := range perNamespaceDenyNamespaces {
+							expectPerNamespaceDenyPolicies(ctx, wcClient, namespace)
+						}
+
+						By("leaving traffic between unlabeled customer namespaces open")
+						ensureNamespace(ctx, wcClient, parityTargetNamespace, nil)
+						target := ensureListenerPod(ctx, wcClient, parityTargetNamespace)
+						ensureNamespace(ctx, wcClient, paritySourceNamespace, nil)
+						ensureProbePod(ctx, wcClient, paritySourceNamespace)
+						expectReachability(ctx, wcClient, paritySourceNamespace, target, true)
+
+						By("resolving DNS and reaching the API server from an unlabeled customer namespace")
+						expectDNS(ctx, wcClient, paritySourceNamespace, true, time.Minute)
+						expectReachability(ctx, wcClient, paritySourceNamespace, kubernetesServiceTarget(ctx, wcClient), true)
+					})
 				})
 
 				Describe("connectivity", Ordered, func() {
@@ -276,13 +317,38 @@ func TestClusterwideDeny(t *testing.T) {
 						expectDNSBlocked(ctx, wcClient, dnsNamespace, labelTimeout)
 					})
 
-					PIt("keeps DNS working in kube-system and giantswarm while allowDNS is off", func() {
+					PIt("keeps DNS working in kube-system and giantswarm with allowDNS off and on", func() {
 						// Pending on purpose: it needs a probe pod in system namespaces,
 						// and creating pods there is intrusive.
 					})
 
-					PIt("keeps DNS working in an unlabeled customer namespace and in kube-system/giantswarm when allowDNS is on", func() {
-						// Needs a second suite or a values flip: allowDNS.enabled: true.
+					It("resolves DNS in an unlabeled namespace while allowDNS is on and stops when it is turned off", func() {
+						ctx := state.GetContext()
+						wcClient := workloadClusterClient()
+
+						ensureNamespace(ctx, wcClient, controlNamespace, map[string]string{optOutLabelKey: "false"})
+						ensureProbePod(ctx, wcClient, controlNamespace)
+						ensureNamespace(ctx, wcClient, allowDNSNamespace, nil)
+						ensureProbePod(ctx, wcClient, allowDNSNamespace)
+
+						// No cleanup on failure: the Ordered container skips the later
+						// specs anyway, and the DNS allow only renders while the deny is
+						// on, which the AfterSuite turns off.
+						By("not resolving a cluster name while allowDNS is off (the default)")
+						exists, err := clusterWidePolicyExists(ctx, allowDNSPolicyName)
+						Expect(err).NotTo(HaveOccurred())
+						Expect(exists).To(BeFalse(), "the CiliumClusterwideNetworkPolicy %s exists although allowDNS is off by default", allowDNSPolicyName)
+						expectDNSBlocked(ctx, wcClient, allowDNSNamespace, 3*time.Minute)
+
+						By("resolving it after turning allowDNS on, without any allow label")
+						Expect(setClusterWideAllowDNS(ctx, true)).To(Succeed())
+						expectClusterWidePolicy(ctx, allowDNSPolicyName, true)
+						expectDNS(ctx, wcClient, allowDNSNamespace, true, labelTimeout)
+
+						By("not resolving it after turning allowDNS off again, back to the default for the later specs")
+						Expect(setClusterWideAllowDNS(ctx, false)).To(Succeed())
+						expectClusterWidePolicy(ctx, allowDNSPolicyName, false)
+						expectDNSBlocked(ctx, wcClient, allowDNSNamespace, labelTimeout)
 					})
 
 					It("grants API server access with allow-kube-apiserver and removes it with the label", func() {
@@ -397,12 +463,6 @@ func TestClusterwideDeny(t *testing.T) {
 						// Needs a Giant Swarm metrics scraper on the cluster.
 					})
 
-					PIt("matches today's behaviour when the clusterwide deny is disabled (per-namespace default-deny-all in kube-system/giantswarm, customer namespaces unaffected)", func() {
-						// The cluster now starts with the deny off, so this could run
-						// in a container before "connectivity", whose BeforeAll turns
-						// the deny on.
-					})
-
 					PIt("keeps Giant Swarm components healthy and Cilium reporting healthy with the clusterwide deny on", func() {
 						// Needs a per-provider list of GS components to check, plus the
 						// Cilium agent health.
@@ -436,7 +496,8 @@ func TestClusterwideDeny(t *testing.T) {
 
 			deleteWebhookConfiguration(ctx, wcClient)
 			deleteNamespaces(ctx, wcClient, deniedNamespace, controlNamespace, targetNamespace,
-				sameNamespaceNamespace, dnsNamespace, apiServerNamespace, allAllowsNamespace, webhookNamespace)
+				sameNamespaceNamespace, dnsNamespace, apiServerNamespace, allAllowsNamespace, webhookNamespace,
+				paritySourceNamespace, parityTargetNamespace, allowDNSNamespace)
 		}).
 		Run(t, "Clusterwide Deny Test")
 }

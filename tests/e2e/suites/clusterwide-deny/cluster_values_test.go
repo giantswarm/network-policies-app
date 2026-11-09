@@ -3,15 +3,18 @@ package clusterwidedeny
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	. "github.com/onsi/gomega"
 
 	helmv2 "github.com/fluxcd/helm-controller/api/v2"
 	"github.com/giantswarm/apptest-framework/v5/pkg/state"
+	"github.com/giantswarm/clustertest/v5/pkg/client"
 	"github.com/giantswarm/clustertest/v5/pkg/logger"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -45,12 +48,25 @@ var networkPoliciesValuesPath = []string{"global", "apps", "networkPolicies", "v
 // cluster's first minute stops default apps (Kyverno) from installing before
 // the standard allows and the per-app allows exist.
 func setClusterWideDeny(ctx context.Context, enabled bool) error {
+	return setNetworkPoliciesValue(ctx, enabled, "denyByDefault", "clusterWide", "enabled")
+}
+
+// setClusterWideAllowDNS turns the clusterwide DNS allow
+// (allow-dns-all-namespaces) on or off the same way. It only renders while the
+// clusterwide deny is on.
+func setClusterWideAllowDNS(ctx context.Context, enabled bool) error {
+	return setNetworkPoliciesValue(ctx, enabled, "denyByDefault", "clusterWide", "allowDNS", "enabled")
+}
+
+// setNetworkPoliciesValue sets one boolean network-policies value in the cluster app's
+// user config, at networkPoliciesValuesPath plus field.
+func setNetworkPoliciesValue(ctx context.Context, value bool, field ...string) error {
 	cluster := state.GetCluster()
 	key := types.NamespacedName{
 		Name:      fmt.Sprintf("%s-userconfig", cluster.ClusterApp.InstallName),
 		Namespace: cluster.ClusterApp.GetNamespace(),
 	}
-	logger.Log("Setting denyByDefault.clusterWide.enabled=%t in the cluster values %s", enabled, key)
+	logger.Log("Setting %s=%v in the cluster values %s", strings.Join(field, "."), value, key)
 
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cm := &corev1.ConfigMap{}
@@ -62,8 +78,8 @@ func setClusterWideDeny(ctx context.Context, enabled bool) error {
 		if err := yaml.Unmarshal([]byte(cm.Data[clusterValuesDataKey]), &values); err != nil {
 			return fmt.Errorf("failed to parse the cluster values in %s: %w", key, err)
 		}
-		path := append(append([]string{}, networkPoliciesValuesPath...), "denyByDefault", "clusterWide", "enabled")
-		if err := unstructured.SetNestedField(values, enabled, path...); err != nil {
+		path := append(append([]string{}, networkPoliciesValuesPath...), field...)
+		if err := unstructured.SetNestedField(values, value, path...); err != nil {
 			return fmt.Errorf("failed to set %v in the cluster values in %s: %w", path, key, err)
 		}
 		out, err := yaml.Marshal(values)
@@ -78,9 +94,31 @@ func setClusterWideDeny(ctx context.Context, enabled bool) error {
 		return state.GetFramework().MC().Update(ctx, cm)
 	})
 	if err != nil {
-		return fmt.Errorf("failed to set the clusterwide deny in the cluster values %s: %w", key, err)
+		return fmt.Errorf("failed to set %s in the cluster values %s: %w", strings.Join(field, "."), key, err)
 	}
 	return nil
+}
+
+// perNamespaceDenyNamespaces are the chart's default denyByDefault.namespaces:
+// while the clusterwide deny is off, each gets a default-deny-all
+// CiliumNetworkPolicy and NetworkPolicy.
+var perNamespaceDenyNamespaces = []string{"kube-system", "giantswarm"}
+
+// perNamespaceDenyPolicyName is the name of both per-namespace deny policies.
+const perNamespaceDenyPolicyName = "default-deny-all"
+
+// expectPerNamespaceDenyPolicies asserts that the namespace holds the chart's
+// default-deny-all CiliumNetworkPolicy and NetworkPolicy.
+func expectPerNamespaceDenyPolicies(ctx context.Context, wcClient *client.Client, namespace string) {
+	key := types.NamespacedName{Namespace: namespace, Name: perNamespaceDenyPolicyName}
+
+	cnp := &unstructured.Unstructured{}
+	cnp.SetAPIVersion("cilium.io/v2")
+	cnp.SetKind("CiliumNetworkPolicy")
+	Expect(wcClient.Get(ctx, key, cnp)).To(Succeed(), "expected the CiliumNetworkPolicy %s while the clusterwide deny is off", key)
+
+	np := &networkingv1.NetworkPolicy{}
+	Expect(wcClient.Get(ctx, key, np)).To(Succeed(), "expected the NetworkPolicy %s while the clusterwide deny is off", key)
 }
 
 // clusterUsesProxy reports whether the cluster values set
@@ -110,14 +148,45 @@ func clusterUsesProxy(ctx context.Context) (bool, error) {
 // clusterWideDenyPolicyExists reports whether the chart's clusterwide deny
 // CCNP exists in the workload cluster.
 func clusterWideDenyPolicyExists(ctx context.Context) (bool, error) {
+	return clusterWidePolicyExists(ctx, clusterWideDenyPolicyName)
+}
+
+// clusterWidePolicyExists reports whether the named
+// CiliumClusterwideNetworkPolicy exists in the workload cluster.
+func clusterWidePolicyExists(ctx context.Context, name string) (bool, error) {
 	policy := &unstructured.Unstructured{}
 	policy.SetAPIVersion("cilium.io/v2")
 	policy.SetKind("CiliumClusterwideNetworkPolicy")
-	err := workloadClusterClient().Get(ctx, types.NamespacedName{Name: clusterWideDenyPolicyName}, policy)
+	err := workloadClusterClient().Get(ctx, types.NamespacedName{Name: name}, policy)
 	if apierrors.IsNotFound(err) {
 		return false, nil
 	}
 	return err == nil, err
+}
+
+// expectClusterWidePolicy waits until the named CCNP exists (present) or is
+// gone, then until the network-policies HelmRelease has settled on the new
+// values, and checks that the state holds for a minute after that, so an
+// upgrade that is rolled back cannot pass.
+func expectClusterWidePolicy(ctx context.Context, name string, present bool) {
+	change := "appear"
+	if !present {
+		change = "go away"
+	}
+	Eventually(func() (bool, error) { return clusterWidePolicyExists(ctx, name) }).
+		WithTimeout(15*time.Minute).
+		WithPolling(15*time.Second).
+		Should(Equal(present), "the CiliumClusterwideNetworkPolicy %s did not %s after changing the cluster values", name, change)
+
+	Eventually(func() error { return networkPoliciesReleaseSettled(ctx) }).
+		WithTimeout(5*time.Minute).
+		WithPolling(15*time.Second).
+		Should(Succeed(), "the network-policies HelmRelease did not settle after changing the cluster values")
+
+	Consistently(func() (bool, error) { return clusterWidePolicyExists(ctx, name) }).
+		WithTimeout(time.Minute).
+		WithPolling(15*time.Second).
+		Should(Equal(present), "the CiliumClusterwideNetworkPolicy %s changed again after the HelmRelease settled", name)
 }
 
 // expectClusterWideDenyPolicy waits until the chart's clusterwide deny CCNP
@@ -126,20 +195,7 @@ func clusterWideDenyPolicyExists(ctx context.Context) (bool, error) {
 // have to reconcile first. Waiting for the HelmRelease too catches an upgrade
 // that renders the CCNP and is then rolled back.
 func expectClusterWideDenyPolicy(ctx context.Context) {
-	Eventually(func() (bool, error) { return clusterWideDenyPolicyExists(ctx) }).
-		WithTimeout(15*time.Minute).
-		WithPolling(15*time.Second).
-		Should(BeTrue(), "the CiliumClusterwideNetworkPolicy %s did not appear after enabling the clusterwide deny in the cluster values", clusterWideDenyPolicyName)
-
-	Eventually(func() error { return networkPoliciesReleaseSettled(ctx) }).
-		WithTimeout(5*time.Minute).
-		WithPolling(15*time.Second).
-		Should(Succeed(), "the network-policies HelmRelease did not settle after enabling the clusterwide deny")
-
-	Consistently(func() (bool, error) { return clusterWideDenyPolicyExists(ctx) }).
-		WithTimeout(time.Minute).
-		WithPolling(15*time.Second).
-		Should(BeTrue(), "the CiliumClusterwideNetworkPolicy %s went away again after the HelmRelease settled", clusterWideDenyPolicyName)
+	expectClusterWidePolicy(ctx, clusterWideDenyPolicyName, true)
 }
 
 // networkPoliciesReleaseSettled returns nil when the network-policies
@@ -167,6 +223,10 @@ func networkPoliciesReleaseSettled(ctx context.Context) error {
 	}
 	return fmt.Errorf("HelmRelease %s has no Ready condition", key)
 }
+
+// allowDNSPolicyName is the CCNP the chart renders when
+// denyByDefault.clusterWide.allowDNS.enabled and the clusterwide deny are on.
+const allowDNSPolicyName = "allow-dns-all-namespaces"
 
 // denyEnabled records that the suite turned the deny on, so teardown only
 // turns it off when there is something to undo.

@@ -36,6 +36,7 @@ const (
 	apiServerNamespace     = "cwd-e2e-apiserver"
 	allAllowsNamespace     = "cwd-e2e-allallows"
 	webhookNamespace       = "cwd-e2e-webhook"
+	allowDNSNamespace      = "cwd-e2e-allowdns"
 
 	// Unlabeled namespaces for the deny-disabled spec, which runs before the
 	// deny is turned on.
@@ -316,13 +317,38 @@ func TestClusterwideDeny(t *testing.T) {
 						expectDNSBlocked(ctx, wcClient, dnsNamespace, labelTimeout)
 					})
 
-					PIt("keeps DNS working in kube-system and giantswarm while allowDNS is off", func() {
+					PIt("keeps DNS working in kube-system and giantswarm with allowDNS off and on", func() {
 						// Pending on purpose: it needs a probe pod in system namespaces,
 						// and creating pods there is intrusive.
 					})
 
-					PIt("keeps DNS working in an unlabeled customer namespace and in kube-system/giantswarm when allowDNS is on", func() {
-						// Needs a second suite or a values flip: allowDNS.enabled: true.
+					It("resolves DNS in an unlabeled namespace while allowDNS is on and stops when it is turned off", func() {
+						ctx := state.GetContext()
+						wcClient := workloadClusterClient()
+
+						ensureNamespace(ctx, wcClient, controlNamespace, map[string]string{optOutLabelKey: "false"})
+						ensureProbePod(ctx, wcClient, controlNamespace)
+						ensureNamespace(ctx, wcClient, allowDNSNamespace, nil)
+						ensureProbePod(ctx, wcClient, allowDNSNamespace)
+
+						// No cleanup on failure: the Ordered container skips the later
+						// specs anyway, and the DNS allow only renders while the deny is
+						// on, which the AfterSuite turns off.
+						By("not resolving a cluster name while allowDNS is off (the default)")
+						exists, err := clusterWidePolicyExists(ctx, allowDNSPolicyName)
+						Expect(err).NotTo(HaveOccurred())
+						Expect(exists).To(BeFalse(), "the CiliumClusterwideNetworkPolicy %s exists although allowDNS is off by default", allowDNSPolicyName)
+						expectDNSBlocked(ctx, wcClient, allowDNSNamespace, 3*time.Minute)
+
+						By("resolving it after turning allowDNS on, without any allow label")
+						Expect(setClusterWideAllowDNS(ctx, true)).To(Succeed())
+						expectClusterWidePolicy(ctx, allowDNSPolicyName, true)
+						expectDNS(ctx, wcClient, allowDNSNamespace, true, labelTimeout)
+
+						By("not resolving it after turning allowDNS off again, back to the default for the later specs")
+						Expect(setClusterWideAllowDNS(ctx, false)).To(Succeed())
+						expectClusterWidePolicy(ctx, allowDNSPolicyName, false)
+						expectDNSBlocked(ctx, wcClient, allowDNSNamespace, labelTimeout)
 					})
 
 					It("grants API server access with allow-kube-apiserver and removes it with the label", func() {
@@ -471,7 +497,7 @@ func TestClusterwideDeny(t *testing.T) {
 			deleteWebhookConfiguration(ctx, wcClient)
 			deleteNamespaces(ctx, wcClient, deniedNamespace, controlNamespace, targetNamespace,
 				sameNamespaceNamespace, dnsNamespace, apiServerNamespace, allAllowsNamespace, webhookNamespace,
-				paritySourceNamespace, parityTargetNamespace)
+				paritySourceNamespace, parityTargetNamespace, allowDNSNamespace)
 		}).
 		Run(t, "Clusterwide Deny Test")
 }

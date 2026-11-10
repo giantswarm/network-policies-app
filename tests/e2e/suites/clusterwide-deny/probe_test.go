@@ -644,6 +644,18 @@ func kubernetesServiceTarget(ctx context.Context, wcClient *client.Client) probe
 	}
 }
 
+// namespaceExistsUnowned reports whether the namespace exists without the
+// suite's owner label, so a spec can skip instead of touching it.
+func namespaceExistsUnowned(ctx context.Context, wcClient *client.Client, name string) bool {
+	namespace := &corev1.Namespace{}
+	err := wcClient.Get(ctx, cr.ObjectKey{Name: name}, namespace)
+	if apierrors.IsNotFound(err) {
+		return false
+	}
+	Expect(err).NotTo(HaveOccurred(), "getting namespace %s", name)
+	return namespace.Labels[ownerLabelKey] != ownerLabelValue
+}
+
 // deleteNamespaces removes the suite's namespaces, ignoring ones already gone
 // and skipping any that do not carry the owner label.
 func deleteNamespaces(ctx context.Context, wcClient *client.Client, names ...string) {

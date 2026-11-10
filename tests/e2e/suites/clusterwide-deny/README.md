@@ -44,7 +44,7 @@ cannot detect a broken opt-out, which the live label flip and cross-namespace
 specs still cover), live opt-out label flip without a pod restart,
 Same-namespace policy, DNS with `allow-dns`, DNS with `allowDNS` on (turned on
 and off again through the cluster values), `allow-kube-apiserver`,
-`allow-webhook-ingress`, and all five allow labels set in one request.
+`allow-webhook-ingress`, `allow-ingress-controller`, and all five allow labels set in one request.
 
 The webhook spec scopes a `ValidatingWebhookConfiguration` (failurePolicy
 Ignore) to labelled probe ConfigMaps in its own namespace and points it at a
@@ -52,8 +52,12 @@ listener pod that counts the connections it accepts. A dry-run ConfigMap CREATE
 that adds a connection means the API server reached the pod. It starts and ends
 with the namespace opted out as the control.
 
-Pending (`PIt`, reason in the spec): `allow-ingress-controller`,
-`allow-metrics-scraping`, DNS in kube-system/giantswarm (allowDNS off and on),
+The ingress controller spec creates `envoy-gateway-system` itself, opted out,
+with a probe pod as the source, since Envoy Gateway is not a default app and
+the standard allow selects any pod in that namespace. It skips if the namespace
+already exists and the suite does not own it.
+
+Pending (`PIt`, reason in the spec): `allow-metrics-scraping`, DNS in kube-system/giantswarm (allowDNS off and on),
 GS components and Cilium health, kyverno-crds install ordering.
 
 Negative results only count when a probe times out (packets dropped). Refusals

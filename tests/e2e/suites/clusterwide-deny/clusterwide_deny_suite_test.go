@@ -37,6 +37,13 @@ const (
 	allAllowsNamespace     = "cwd-e2e-allallows"
 	webhookNamespace       = "cwd-e2e-webhook"
 	allowDNSNamespace      = "cwd-e2e-allowdns"
+	ingressCtrlNamespace   = "cwd-e2e-ingressctl"
+
+	// envoyGatewayNamespace is the source the allow-ingress-controller
+	// standard allow selects: any pod in it. The suite creates it with a probe
+	// pod, since Envoy Gateway is not a default app, and skips the spec if a
+	// real one exists.
+	envoyGatewayNamespace = "envoy-gateway-system"
 
 	// Unlabeled namespaces for the deny-disabled spec, which runs before the
 	// deny is turned on.
@@ -455,8 +462,48 @@ func TestClusterwideDeny(t *testing.T) {
 						expectWebhook(ctx, wcClient, true, labelTimeout)
 					})
 
-					PIt("grants ingress from the ingress controller with allow-ingress-controller", func() {
-						// Needs envoy-gateway on the cluster.
+					It("grants ingress from the ingress controller with allow-ingress-controller and removes it with the label", func() {
+						ctx := state.GetContext()
+						wcClient := workloadClusterClient()
+
+						if namespaceExistsUnowned(ctx, wcClient, envoyGatewayNamespace) {
+							Skip(fmt.Sprintf("namespace %s exists and is not owned by this suite, so the suite cannot stand in for Envoy Gateway", envoyGatewayNamespace))
+						}
+
+						// The source is opted out, so its own egress is open and only the
+						// target's ingress decides.
+						ensureNamespace(ctx, wcClient, envoyGatewayNamespace, map[string]string{optOutLabelKey: "false"})
+						ensureProbePod(ctx, wcClient, envoyGatewayNamespace)
+						ensureNamespace(ctx, wcClient, controlNamespace, map[string]string{optOutLabelKey: "false"})
+						ensureProbePod(ctx, wcClient, controlNamespace)
+
+						// Starts opted out, so the first step proves the target answers.
+						ensureNamespace(ctx, wcClient, ingressCtrlNamespace, map[string]string{optOutLabelKey: "false"})
+						target := ensureListenerPod(ctx, wcClient, ingressCtrlNamespace)
+
+						By("reaching the target from the Envoy Gateway namespace while it is opted out (control)")
+						expectReachability(ctx, wcClient, envoyGatewayNamespace, target, true)
+
+						By("not reaching it after removing the opt-out label")
+						setNamespaceLabels(ctx, wcClient, ingressCtrlNamespace, nil, optOutLabelKey)
+						expectBlocked(ctx, wcClient, envoyGatewayNamespace, target, loopbackControl(ingressCtrlNamespace, listenerPodName), labelTimeout)
+
+						By("reaching it from the Envoy Gateway namespace after adding allow-ingress-controller=true")
+						setNamespaceLabels(ctx, wcClient, ingressCtrlNamespace, map[string]string{allowIngressCtrlLabel: "true"})
+						expectReachabilityWithin(ctx, wcClient, envoyGatewayNamespace, target, true, labelTimeout)
+
+						// The allow selects the source namespace, so another opted-out
+						// namespace must stay blocked.
+						By("still not reaching it from another namespace")
+						expectReachabilityWithin(ctx, wcClient, controlNamespace, target, false, labelTimeout)
+
+						By("not reaching it after removing the label")
+						setNamespaceLabels(ctx, wcClient, ingressCtrlNamespace, nil, allowIngressCtrlLabel)
+						expectBlocked(ctx, wcClient, envoyGatewayNamespace, target, loopbackControl(ingressCtrlNamespace, listenerPodName), labelTimeout)
+
+						By("reaching it again after opting the namespace out (control)")
+						setNamespaceLabels(ctx, wcClient, ingressCtrlNamespace, map[string]string{optOutLabelKey: "false"})
+						expectReachabilityWithin(ctx, wcClient, envoyGatewayNamespace, target, true, labelTimeout)
 					})
 
 					PIt("grants metrics scraping with allow-metrics-scraping", func() {
@@ -497,7 +544,7 @@ func TestClusterwideDeny(t *testing.T) {
 			deleteWebhookConfiguration(ctx, wcClient)
 			deleteNamespaces(ctx, wcClient, deniedNamespace, controlNamespace, targetNamespace,
 				sameNamespaceNamespace, dnsNamespace, apiServerNamespace, allAllowsNamespace, webhookNamespace,
-				paritySourceNamespace, parityTargetNamespace, allowDNSNamespace)
+				paritySourceNamespace, parityTargetNamespace, allowDNSNamespace, ingressCtrlNamespace, envoyGatewayNamespace)
 		}).
 		Run(t, "Clusterwide Deny Test")
 }

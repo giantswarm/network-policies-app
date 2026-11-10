@@ -63,16 +63,19 @@ sources, which these specs don't test:
   installs a real Envoy Gateway into the suite's namespace during a run.
 - Metrics scraping: the spec creates a probe pod in kube-system with the
   `app.kubernetes.io/instance: alloy-metrics` label the standard allow selects,
-  plus a suite-owned egress policy for it, since kube-system is under the deny.
-  The pod has no `app.kubernetes.io/name` label, so the real alloy-metrics
-  workloads and Service don't select it. Both are removed after the spec and
-  in the AfterSuite.
+  plus a second kube-system probe pod without it as the negative control, and a
+  suite-owned egress policy for both, since kube-system is under the deny. The
+  pod has no `app.kubernetes.io/name` label, so the real alloy-metrics
+  workloads and Service don't select it, but anything selecting on the
+  instance label alone (a PodMonitor, an alert) may see it while the spec
+  runs. All three are removed after the spec and in the AfterSuite. The suite
+  never touches a pod or policy it doesn't own.
 
 Both only prove the target's ingress side. The real sources also need their
 own egress opened under the deny, which no standard allow does.
 
 Pending (`PIt`, reason in the spec): DNS in kube-system/giantswarm (allowDNS off
-and on), GS components and Cilium health, kyverno-crds install ordering.
+and on, not written yet), GS components and Cilium health, kyverno-crds install ordering.
 
 Negative results only count when a probe times out (packets dropped). Refusals
 and other errors fail loudly. Label changes take up to about a minute to show

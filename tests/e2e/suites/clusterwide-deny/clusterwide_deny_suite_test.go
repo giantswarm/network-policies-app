@@ -326,8 +326,8 @@ func TestClusterwideDeny(t *testing.T) {
 					})
 
 					PIt("keeps DNS working in kube-system and giantswarm with allowDNS off and on", func() {
-						// Pending on purpose: it needs a probe pod in system namespaces,
-						// and creating pods there is intrusive.
+						// Not written yet: it needs owned probe pods in kube-system and
+						// giantswarm, like the metrics stand-in in kube-system.
 					})
 
 					It("resolves DNS in an unlabeled namespace while allowDNS is on and stops when it is turned off", func() {
@@ -473,6 +473,11 @@ func TestClusterwideDeny(t *testing.T) {
 						// The source is opted out, so its own egress is open and only the
 						// target's ingress decides.
 						ensureNamespace(ctx, wcClient, envoyGatewayNamespace, map[string]string{optOutLabelKey: "false"})
+						// Removed right after the spec, so an opted-out namespace with
+						// this name never outlives it.
+						DeferCleanup(func() {
+							deleteNamespaces(ctx, wcClient, envoyGatewayNamespace)
+						})
 						ensureProbePod(ctx, wcClient, envoyGatewayNamespace)
 						ensureNamespace(ctx, wcClient, controlNamespace, map[string]string{optOutLabelKey: "false"})
 						ensureProbePod(ctx, wcClient, controlNamespace)
@@ -526,26 +531,29 @@ func TestClusterwideDeny(t *testing.T) {
 						target := ensureListenerPod(ctx, wcClient, metricsNamespace)
 
 						By("reaching the target from the metrics probe while the namespace is opted out (control)")
-						expectReachabilityFromPodWithin(ctx, wcClient, installNamespace, metricsProbePodName, target, true, 3*time.Minute)
+						expectReachabilityFromPodWithin(ctx, wcClient, metricsScraperNamespace, metricsProbePodName, target, true, 3*time.Minute)
 
 						By("not reaching it after removing the opt-out label")
 						setNamespaceLabels(ctx, wcClient, metricsNamespace, nil, optOutLabelKey)
-						expectBlockedFromPod(ctx, wcClient, installNamespace, metricsProbePodName, target, loopbackControl(metricsNamespace, listenerPodName), labelTimeout)
+						expectBlockedFromPod(ctx, wcClient, metricsScraperNamespace, metricsProbePodName, target, loopbackControl(metricsNamespace, listenerPodName), labelTimeout)
 
 						By("reaching it from the metrics probe after adding allow-metrics-scraping=true")
 						setNamespaceLabels(ctx, wcClient, metricsNamespace, map[string]string{allowMetricsLabel: "true"})
-						expectReachabilityFromPodWithin(ctx, wcClient, installNamespace, metricsProbePodName, target, true, labelTimeout)
+						expectReachabilityFromPodWithin(ctx, wcClient, metricsScraperNamespace, metricsProbePodName, target, true, labelTimeout)
 
 						By("still not reaching it from another namespace, while the metrics probe does")
 						expectBlocked(ctx, wcClient, controlNamespace, target, metricsProbeControl, labelTimeout)
 
+						By("still not reaching it from a kube-system pod without the metrics agent label")
+						expectBlockedFromPod(ctx, wcClient, metricsScraperNamespace, kubeSystemProbePodName, target, metricsProbeControl, labelTimeout)
+
 						By("not reaching it after removing the label")
 						setNamespaceLabels(ctx, wcClient, metricsNamespace, nil, allowMetricsLabel)
-						expectBlockedFromPod(ctx, wcClient, installNamespace, metricsProbePodName, target, loopbackControl(metricsNamespace, listenerPodName), labelTimeout)
+						expectBlockedFromPod(ctx, wcClient, metricsScraperNamespace, metricsProbePodName, target, loopbackControl(metricsNamespace, listenerPodName), labelTimeout)
 
 						By("reaching it again after opting the namespace out (control)")
 						setNamespaceLabels(ctx, wcClient, metricsNamespace, map[string]string{optOutLabelKey: "false"})
-						expectReachabilityFromPodWithin(ctx, wcClient, installNamespace, metricsProbePodName, target, true, labelTimeout)
+						expectReachabilityFromPodWithin(ctx, wcClient, metricsScraperNamespace, metricsProbePodName, target, true, labelTimeout)
 					})
 
 					PIt("keeps Giant Swarm components healthy and Cilium reporting healthy with the clusterwide deny on", func() {

@@ -512,7 +512,7 @@ func TestClusterwideDeny(t *testing.T) {
 					})
 
 					// The source is a stand-in for the metrics agent in kube-system
-					// (see metricsProbe), since the real one's own egress policies
+					// (see ensureMetricsProbe), since the real one's own egress policies
 					// are not what this spec tests.
 					It("grants metrics scraping with allow-metrics-scraping and removes it with the label", func() {
 						ctx := state.GetContext()

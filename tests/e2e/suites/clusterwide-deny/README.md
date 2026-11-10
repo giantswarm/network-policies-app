@@ -75,7 +75,8 @@ Both only prove the target's ingress side. The real sources also need their
 own egress opened under the deny, which no standard allow does.
 
 Pending (`PIt`, reason in the spec): DNS in kube-system/giantswarm (allowDNS off
-and on, not written yet), GS components and Cilium health, kyverno-crds install ordering.
+and on, not written yet), GS components and Cilium health, kyverno-crds install
+ordering.
 
 Negative results only count when a probe times out (packets dropped). Refusals
 and other errors fail loudly. Label changes take up to about a minute to show

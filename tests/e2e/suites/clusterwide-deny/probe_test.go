@@ -264,8 +264,9 @@ func ensurePodWithLabels(ctx context.Context, wcClient *client.Client, namespace
 }
 
 // recreateUnhealthyPod fails on an existing pod that is not owned by this
-// suite, and deletes an owned one that has finished, or differs from the desired image/args/labels, and waits until it is
-// gone so the caller can create a fresh one.
+// suite. An owned pod that has finished or differs from the desired
+// image/args/labels is deleted, and it waits until the pod is gone so the
+// caller can create a fresh one.
 func recreateUnhealthyPod(ctx context.Context, wcClient *client.Client, desired *corev1.Pod) {
 	existing := &corev1.Pod{}
 	err := wcClient.Get(ctx, cr.ObjectKeyFromObject(desired), existing)
@@ -277,7 +278,6 @@ func recreateUnhealthyPod(ctx context.Context, wcClient *client.Client, desired 
 		"pod %s/%s exists and is not owned by this suite", existing.Namespace, existing.Name)
 
 	healthy := existing.DeletionTimestamp == nil &&
-		existing.Labels[ownerLabelKey] == ownerLabelValue &&
 		existing.Status.Phase != corev1.PodFailed && existing.Status.Phase != corev1.PodSucceeded &&
 		len(existing.Spec.Containers) == 1 &&
 		existing.Spec.Containers[0].Image == desired.Spec.Containers[0].Image &&

@@ -44,7 +44,8 @@ cannot detect a broken opt-out, which the live label flip and cross-namespace
 specs still cover), live opt-out label flip without a pod restart,
 Same-namespace policy, DNS with `allow-dns`, DNS with `allowDNS` on (turned on
 and off again through the cluster values), `allow-kube-apiserver`,
-`allow-webhook-ingress`, and all five allow labels set in one request.
+`allow-webhook-ingress`, `allow-ingress-controller`, `allow-metrics-scraping`,
+and all five allow labels set in one request.
 
 The webhook spec scopes a `ValidatingWebhookConfiguration` (failurePolicy
 Ignore) to labelled probe ConfigMaps in its own namespace and points it at a
@@ -52,9 +53,30 @@ listener pod that counts the connections it accepts. A dry-run ConfigMap CREATE
 that adds a connection means the API server reached the pod. It starts and ends
 with the namespace opted out as the control.
 
-Pending (`PIt`, reason in the spec): `allow-ingress-controller`,
-`allow-metrics-scraping`, DNS in kube-system/giantswarm (allowDNS off and on),
-GS components and Cilium health, kyverno-crds install ordering.
+The ingress controller and metrics scraping specs stand in for the real
+sources, which these specs don't test:
+
+- Ingress controller: the spec creates `envoy-gateway-system` itself, opted
+  out, with a probe pod as the source, since Envoy Gateway is not a default app
+  and the standard allow selects any pod in that namespace. It skips if the
+  namespace already exists and the suite does not own it. It assumes nothing
+  installs a real Envoy Gateway into the suite's namespace during a run.
+- Metrics scraping: the spec creates a probe pod in kube-system with the
+  `app.kubernetes.io/instance: alloy-metrics` label the standard allow selects,
+  plus a second kube-system probe pod without it as the negative control, and a
+  suite-owned egress policy for both, since kube-system is under the deny. The
+  pod has no `app.kubernetes.io/name` label, so the real alloy-metrics
+  workloads and Service don't select it, but anything selecting on the
+  instance label alone (a PodMonitor, an alert) may see it while the spec
+  runs. All three are removed after the spec and in the AfterSuite. The suite
+  never touches a pod or policy it doesn't own.
+
+Both only prove the target's ingress side. The real sources also need their
+own egress opened under the deny, which no standard allow does.
+
+Pending (`PIt`, reason in the spec): DNS in kube-system/giantswarm (allowDNS off
+and on, not written yet), GS components and Cilium health, kyverno-crds install
+ordering.
 
 Negative results only count when a probe times out (packets dropped). Refusals
 and other errors fail loudly. Label changes take up to about a minute to show

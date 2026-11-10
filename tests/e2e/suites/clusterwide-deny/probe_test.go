@@ -263,9 +263,10 @@ func ensurePodWithLabels(ctx context.Context, wcClient *client.Client, namespace
 		Should(BeTrue(), func() string { return podDiagnostics(ctx, wcClient, pod) })
 }
 
-// recreateUnhealthyPod deletes an existing pod that is not owned by this suite,
-// has finished, or differs from the desired image/args/labels, and waits until it is
-// gone so the caller can create a fresh one.
+// recreateUnhealthyPod fails on an existing pod that is not owned by this
+// suite. An owned pod that has finished or differs from the desired
+// image/args/labels is deleted, and it waits until the pod is gone so the
+// caller can create a fresh one.
 func recreateUnhealthyPod(ctx context.Context, wcClient *client.Client, desired *corev1.Pod) {
 	existing := &corev1.Pod{}
 	err := wcClient.Get(ctx, cr.ObjectKeyFromObject(desired), existing)
@@ -273,9 +274,10 @@ func recreateUnhealthyPod(ctx context.Context, wcClient *client.Client, desired 
 		return
 	}
 	Expect(err).NotTo(HaveOccurred())
+	Expect(existing.Labels[ownerLabelKey]).To(Equal(ownerLabelValue),
+		"pod %s/%s exists and is not owned by this suite", existing.Namespace, existing.Name)
 
 	healthy := existing.DeletionTimestamp == nil &&
-		existing.Labels[ownerLabelKey] == ownerLabelValue &&
 		existing.Status.Phase != corev1.PodFailed && existing.Status.Phase != corev1.PodSucceeded &&
 		len(existing.Spec.Containers) == 1 &&
 		existing.Spec.Containers[0].Image == desired.Spec.Containers[0].Image &&
@@ -345,13 +347,19 @@ func expectReachability(ctx context.Context, wcClient *client.Client, fromNamesp
 // expectReachabilityWithin is expectReachability with its own bound for how
 // long the expected state may take to appear.
 func expectReachabilityWithin(ctx context.Context, wcClient *client.Client, fromNamespace string, target probeTarget, want bool, within time.Duration) {
+	expectReachabilityFromPodWithin(ctx, wcClient, fromNamespace, probePodName, target, want, within)
+}
+
+// expectReachabilityFromPodWithin is expectReachabilityWithin from a named pod
+// instead of the namespace's probe pod.
+func expectReachabilityFromPodWithin(ctx context.Context, wcClient *client.Client, fromNamespace, fromPod string, target probeTarget, want bool, within time.Duration) {
 	expectState(func() (bool, error) {
-		result, err := probeHTTP(ctx, wcClient, fromNamespace, target)
+		result, err := probeHTTPFrom(ctx, wcClient, fromNamespace, fromPod, target)
 		if err != nil {
 			return false, err
 		}
 		return result == outcomeReachable, nil
-	}, fmt.Sprintf("%s from %s", target, fromNamespace), want, within, 30*time.Second)
+	}, fmt.Sprintf("%s from %s/%s", target, fromNamespace, fromPod), want, within, 30*time.Second)
 }
 
 // controlProbe is a probe that must succeed against the same target as a
@@ -382,7 +390,13 @@ func loopbackControl(namespace, pod string) controlProbe {
 // connecting, so a timeout alone cannot tell a dropped packet from a dead or
 // slow target. The control proves the target answers when it is allowed to.
 func expectBlocked(ctx context.Context, wcClient *client.Client, fromNamespace string, target probeTarget, control controlProbe, within time.Duration) {
-	expectReachabilityWithin(ctx, wcClient, fromNamespace, target, false, within)
+	expectBlockedFromPod(ctx, wcClient, fromNamespace, probePodName, target, control, within)
+}
+
+// expectBlockedFromPod is expectBlocked from a named pod instead of the
+// namespace's probe pod.
+func expectBlockedFromPod(ctx context.Context, wcClient *client.Client, fromNamespace, fromPod string, target probeTarget, control controlProbe, within time.Duration) {
+	expectReachabilityFromPodWithin(ctx, wcClient, fromNamespace, fromPod, target, false, within)
 
 	controlTarget := target
 	if control.Host != "" {
@@ -397,7 +411,7 @@ func expectBlocked(ctx context.Context, wcClient *client.Client, fromNamespace s
 	}).
 		WithTimeout(time.Minute).
 		WithPolling(5*time.Second).
-		Should(BeTrue(), "the control in %s/%s cannot reach %s, so the blocked result from %s proves nothing", control.Namespace, control.Pod, target, fromNamespace)
+		Should(BeTrue(), "the control in %s/%s cannot reach %s, so the blocked result from %s/%s proves nothing", control.Namespace, control.Pod, target, fromNamespace, fromPod)
 }
 
 // expectDNSBlocked is expectBlocked for DNS: after the blocked result the
@@ -475,7 +489,7 @@ func probeHTTPFrom(ctx context.Context, wcClient *client.Client, fromNamespace, 
 
 	code, detail, _ := strings.Cut(strings.TrimSpace(stdout), "\n")
 	detail = strings.TrimSpace(detail)
-	logger.Log("HTTP probe from %s to %s: exit=%s %s", fromNamespace, target, code, detail)
+	logger.Log("HTTP probe from %s/%s to %s: exit=%s %s", fromNamespace, pod, target, code, detail)
 
 	if code == "0" {
 		return outcomeReachable, nil
@@ -642,6 +656,129 @@ func kubernetesServiceTarget(ctx context.Context, wcClient *client.Client) probe
 		Path:           "/version",
 		HTTPSAnyAnswer: true,
 	}
+}
+
+// The metrics probe is a stand-in for the Giant Swarm metrics agent: a probe
+// pod in kube-system carrying the alloy-metrics instance label that the
+// allow-metrics-scraping standard allow selects as its source, plus the
+// suite's owner label. It deliberately has no app.kubernetes.io/name label, so
+// the real alloy-metrics Service and workloads never select it. A second probe
+// pod in kube-system without the instance label proves the allow also checks
+// the label, not only the namespace. kube-system is under the clusterwide
+// deny, so a suite-owned policy opens the egress of both.
+const (
+	// metricsScraperNamespace is where the standard allow expects the agent.
+	metricsScraperNamespace      = "kube-system"
+	metricsProbePodName          = "cwd-e2e-metrics-probe"
+	kubeSystemProbePodName       = "cwd-e2e-kube-system-probe"
+	kubeSystemProbeRole          = "kube-system-probe"
+	metricsProbeEgressPolicyName = "cwd-e2e-metrics-probe-egress"
+	metricsScraperLabelKey       = "app.kubernetes.io/instance"
+	metricsScraperLabelValue     = "alloy-metrics"
+)
+
+// metricsProbeControl reaches a target from the metrics probe itself; it is
+// the control for targets that other sources are blocked from.
+var metricsProbeControl = controlProbe{Namespace: metricsScraperNamespace, Pod: metricsProbePodName}
+
+func metricsProbeEgressPolicy() *unstructured.Unstructured {
+	policy := &unstructured.Unstructured{Object: map[string]any{
+		"spec": map[string]any{
+			"endpointSelector": map[string]any{"matchLabels": map[string]any{
+				ownerLabelKey:    ownerLabelValue,
+				webhookRoleLabel: kubeSystemProbeRole,
+			}},
+			"enableDefaultDeny": map[string]any{"ingress": false, "egress": false},
+			"egress":            []any{map[string]any{"toEntities": []any{"cluster"}}},
+		},
+	}}
+	policy.SetAPIVersion("cilium.io/v2")
+	policy.SetKind("CiliumNetworkPolicy")
+	policy.SetName(metricsProbeEgressPolicyName)
+	policy.SetNamespace(metricsScraperNamespace)
+	policy.SetLabels(map[string]string{ownerLabelKey: ownerLabelValue})
+	return policy
+}
+
+// ensureMetricsProbe creates the egress policy and both kube-system probe
+// pods. An existing policy must be owned by the suite and gets the desired
+// spec, so a leftover from an older run cannot widen or break the probes.
+func ensureMetricsProbe(ctx context.Context, wcClient *client.Client) {
+	desired := metricsProbeEgressPolicy()
+	Eventually(func() error {
+		err := wcClient.Create(ctx, desired.DeepCopy())
+		if err == nil {
+			return nil
+		}
+		if !apierrors.IsAlreadyExists(err) {
+			return StopTrying(fmt.Sprintf("unexpected error creating policy %s/%s: %v", metricsScraperNamespace, metricsProbeEgressPolicyName, err))
+		}
+		existing := &unstructured.Unstructured{}
+		existing.SetGroupVersionKind(desired.GroupVersionKind())
+		if err := wcClient.Get(ctx, cr.ObjectKeyFromObject(desired), existing); err != nil {
+			return err
+		}
+		if existing.GetLabels()[ownerLabelKey] != ownerLabelValue {
+			return StopTrying(fmt.Sprintf("policy %s/%s exists and is not owned by this suite", metricsScraperNamespace, metricsProbeEgressPolicyName))
+		}
+		existing.Object["spec"] = desired.Object["spec"]
+		return wcClient.Update(ctx, existing)
+	}).
+		WithTimeout(time.Minute).
+		WithPolling(2 * time.Second).
+		Should(Succeed())
+
+	sleep := []string{"sleep", "99999999"}
+	ensurePodWithLabels(ctx, wcClient, metricsScraperNamespace, metricsProbePodName, sleep, 0,
+		map[string]string{webhookRoleLabel: kubeSystemProbeRole, metricsScraperLabelKey: metricsScraperLabelValue})
+	ensurePodWithLabels(ctx, wcClient, metricsScraperNamespace, kubeSystemProbePodName, sleep, 0,
+		map[string]string{webhookRoleLabel: kubeSystemProbeRole})
+}
+
+// deleteMetricsProbe removes both kube-system probe pods and their egress
+// policy, only if they carry the owner label.
+func deleteMetricsProbe(ctx context.Context, wcClient *client.Client) {
+	for _, name := range []string{metricsProbePodName, kubeSystemProbePodName} {
+		pod := &corev1.Pod{}
+		err := wcClient.Get(ctx, cr.ObjectKey{Namespace: metricsScraperNamespace, Name: name}, pod)
+		switch {
+		case apierrors.IsNotFound(err):
+		case err != nil:
+			logger.Log("Failed to get pod %s/%s for cleanup: %s", metricsScraperNamespace, name, err)
+		case pod.Labels[ownerLabelKey] != ownerLabelValue:
+			logger.Log("Not deleting pod %s/%s, it is not owned by this suite", metricsScraperNamespace, name)
+		default:
+			if err := cr.IgnoreNotFound(wcClient.Delete(ctx, pod)); err != nil {
+				logger.Log("Failed to delete pod %s/%s: %s", metricsScraperNamespace, name, err)
+			}
+		}
+	}
+
+	policy := metricsProbeEgressPolicy()
+	err := wcClient.Get(ctx, cr.ObjectKeyFromObject(policy), policy)
+	switch {
+	case apierrors.IsNotFound(err):
+	case err != nil:
+		logger.Log("Failed to get policy %s/%s for cleanup: %s", metricsScraperNamespace, metricsProbeEgressPolicyName, err)
+	case policy.GetLabels()[ownerLabelKey] != ownerLabelValue:
+		logger.Log("Not deleting policy %s/%s, it is not owned by this suite", metricsScraperNamespace, metricsProbeEgressPolicyName)
+	default:
+		if err := cr.IgnoreNotFound(wcClient.Delete(ctx, policy)); err != nil {
+			logger.Log("Failed to delete policy %s/%s: %s", metricsScraperNamespace, metricsProbeEgressPolicyName, err)
+		}
+	}
+}
+
+// namespaceExistsUnowned reports whether the namespace exists without the
+// suite's owner label, so a spec can skip instead of touching it.
+func namespaceExistsUnowned(ctx context.Context, wcClient *client.Client, name string) bool {
+	namespace := &corev1.Namespace{}
+	err := wcClient.Get(ctx, cr.ObjectKey{Name: name}, namespace)
+	if apierrors.IsNotFound(err) {
+		return false
+	}
+	Expect(err).NotTo(HaveOccurred(), "getting namespace %s", name)
+	return namespace.Labels[ownerLabelKey] != ownerLabelValue
 }
 
 // deleteNamespaces removes the suite's namespaces, ignoring ones already gone

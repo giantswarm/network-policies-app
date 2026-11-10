@@ -345,13 +345,19 @@ func expectReachability(ctx context.Context, wcClient *client.Client, fromNamesp
 // expectReachabilityWithin is expectReachability with its own bound for how
 // long the expected state may take to appear.
 func expectReachabilityWithin(ctx context.Context, wcClient *client.Client, fromNamespace string, target probeTarget, want bool, within time.Duration) {
+	expectReachabilityFromPodWithin(ctx, wcClient, fromNamespace, probePodName, target, want, within)
+}
+
+// expectReachabilityFromPodWithin is expectReachabilityWithin from a named pod
+// instead of the namespace's probe pod.
+func expectReachabilityFromPodWithin(ctx context.Context, wcClient *client.Client, fromNamespace, fromPod string, target probeTarget, want bool, within time.Duration) {
 	expectState(func() (bool, error) {
-		result, err := probeHTTP(ctx, wcClient, fromNamespace, target)
+		result, err := probeHTTPFrom(ctx, wcClient, fromNamespace, fromPod, target)
 		if err != nil {
 			return false, err
 		}
 		return result == outcomeReachable, nil
-	}, fmt.Sprintf("%s from %s", target, fromNamespace), want, within, 30*time.Second)
+	}, fmt.Sprintf("%s from %s/%s", target, fromNamespace, fromPod), want, within, 30*time.Second)
 }
 
 // controlProbe is a probe that must succeed against the same target as a
@@ -382,7 +388,13 @@ func loopbackControl(namespace, pod string) controlProbe {
 // connecting, so a timeout alone cannot tell a dropped packet from a dead or
 // slow target. The control proves the target answers when it is allowed to.
 func expectBlocked(ctx context.Context, wcClient *client.Client, fromNamespace string, target probeTarget, control controlProbe, within time.Duration) {
-	expectReachabilityWithin(ctx, wcClient, fromNamespace, target, false, within)
+	expectBlockedFromPod(ctx, wcClient, fromNamespace, probePodName, target, control, within)
+}
+
+// expectBlockedFromPod is expectBlocked from a named pod instead of the
+// namespace's probe pod.
+func expectBlockedFromPod(ctx context.Context, wcClient *client.Client, fromNamespace, fromPod string, target probeTarget, control controlProbe, within time.Duration) {
+	expectReachabilityFromPodWithin(ctx, wcClient, fromNamespace, fromPod, target, false, within)
 
 	controlTarget := target
 	if control.Host != "" {
@@ -397,7 +409,7 @@ func expectBlocked(ctx context.Context, wcClient *client.Client, fromNamespace s
 	}).
 		WithTimeout(time.Minute).
 		WithPolling(5*time.Second).
-		Should(BeTrue(), "the control in %s/%s cannot reach %s, so the blocked result from %s proves nothing", control.Namespace, control.Pod, target, fromNamespace)
+		Should(BeTrue(), "the control in %s/%s cannot reach %s, so the blocked result from %s/%s proves nothing", control.Namespace, control.Pod, target, fromNamespace, fromPod)
 }
 
 // expectDNSBlocked is expectBlocked for DNS: after the blocked result the
@@ -641,6 +653,85 @@ func kubernetesServiceTarget(ctx context.Context, wcClient *client.Client) probe
 		Scheme:         "https",
 		Path:           "/version",
 		HTTPSAnyAnswer: true,
+	}
+}
+
+// metricsProbe is a stand-in for the Giant Swarm metrics agent: a probe pod in
+// kube-system carrying the alloy-metrics instance label that the
+// allow-metrics-scraping standard allow selects as its source, plus the
+// suite's owner label. It deliberately has no app.kubernetes.io/name label, so
+// the real alloy-metrics Service and workloads never select it. kube-system is
+// under the clusterwide deny, so a suite-owned policy opens the probe's egress.
+const (
+	metricsProbePodName          = "cwd-e2e-metrics-probe"
+	metricsProbeEgressPolicyName = "cwd-e2e-metrics-probe-egress"
+	metricsScraperLabelKey       = "app.kubernetes.io/instance"
+	metricsScraperLabelValue     = "alloy-metrics"
+)
+
+// metricsProbeControl reaches a target from the metrics probe itself; it is
+// the control for targets only another namespace is blocked from.
+var metricsProbeControl = controlProbe{Namespace: installNamespace, Pod: metricsProbePodName}
+
+func metricsProbeEgressPolicy() *unstructured.Unstructured {
+	policy := &unstructured.Unstructured{Object: map[string]any{
+		"spec": map[string]any{
+			"endpointSelector": map[string]any{"matchLabels": map[string]any{
+				ownerLabelKey:          ownerLabelValue,
+				metricsScraperLabelKey: metricsScraperLabelValue,
+			}},
+			"enableDefaultDeny": map[string]any{"ingress": false, "egress": false},
+			"egress":            []any{map[string]any{"toEntities": []any{"cluster"}}},
+		},
+	}}
+	policy.SetAPIVersion("cilium.io/v2")
+	policy.SetKind("CiliumNetworkPolicy")
+	policy.SetName(metricsProbeEgressPolicyName)
+	policy.SetNamespace(installNamespace)
+	policy.SetLabels(map[string]string{ownerLabelKey: ownerLabelValue})
+	return policy
+}
+
+// ensureMetricsProbe creates the metrics probe pod and its egress policy in
+// kube-system.
+func ensureMetricsProbe(ctx context.Context, wcClient *client.Client) {
+	err := wcClient.Create(ctx, metricsProbeEgressPolicy())
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred())
+	}
+	ensurePodWithLabels(ctx, wcClient, installNamespace, metricsProbePodName, []string{"sleep", "99999999"}, 0,
+		map[string]string{metricsScraperLabelKey: metricsScraperLabelValue})
+}
+
+// deleteMetricsProbe removes the metrics probe pod and its egress policy from
+// kube-system, only if they carry the owner label.
+func deleteMetricsProbe(ctx context.Context, wcClient *client.Client) {
+	pod := &corev1.Pod{}
+	err := wcClient.Get(ctx, cr.ObjectKey{Namespace: installNamespace, Name: metricsProbePodName}, pod)
+	switch {
+	case apierrors.IsNotFound(err):
+	case err != nil:
+		logger.Log("Failed to get pod %s/%s for cleanup: %s", installNamespace, metricsProbePodName, err)
+	case pod.Labels[ownerLabelKey] != ownerLabelValue:
+		logger.Log("Not deleting pod %s/%s, it is not owned by this suite", installNamespace, metricsProbePodName)
+	default:
+		if err := cr.IgnoreNotFound(wcClient.Delete(ctx, pod)); err != nil {
+			logger.Log("Failed to delete pod %s/%s: %s", installNamespace, metricsProbePodName, err)
+		}
+	}
+
+	policy := metricsProbeEgressPolicy()
+	err = wcClient.Get(ctx, cr.ObjectKeyFromObject(policy), policy)
+	switch {
+	case apierrors.IsNotFound(err):
+	case err != nil:
+		logger.Log("Failed to get policy %s/%s for cleanup: %s", installNamespace, metricsProbeEgressPolicyName, err)
+	case policy.GetLabels()[ownerLabelKey] != ownerLabelValue:
+		logger.Log("Not deleting policy %s/%s, it is not owned by this suite", installNamespace, metricsProbeEgressPolicyName)
+	default:
+		if err := cr.IgnoreNotFound(wcClient.Delete(ctx, policy)); err != nil {
+			logger.Log("Failed to delete policy %s/%s: %s", installNamespace, metricsProbeEgressPolicyName, err)
+		}
 	}
 }
 

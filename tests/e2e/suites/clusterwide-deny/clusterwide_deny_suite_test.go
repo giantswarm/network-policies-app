@@ -38,6 +38,7 @@ const (
 	webhookNamespace       = "cwd-e2e-webhook"
 	allowDNSNamespace      = "cwd-e2e-allowdns"
 	ingressCtrlNamespace   = "cwd-e2e-ingressctl"
+	metricsNamespace       = "cwd-e2e-metrics"
 
 	// envoyGatewayNamespace is the source the allow-ingress-controller
 	// standard allow selects: any pod in it. The suite creates it with a probe
@@ -381,9 +382,8 @@ func TestClusterwideDeny(t *testing.T) {
 					})
 
 					// Covers the DNS and API server allows. webhook-ingress,
-					// ingress-controller and metrics-scraping are labelled too:
-					// webhook-ingress is verified by its own spec, the other two by
-					// pending specs.
+					// ingress-controller and metrics-scraping are labelled too and
+					// verified by their own specs.
 					It("keeps the DNS and API server allows working when all five allow labels are set in one request", func() {
 						ctx := state.GetContext()
 						wcClient := workloadClusterClient()
@@ -494,8 +494,8 @@ func TestClusterwideDeny(t *testing.T) {
 
 						// The allow selects the source namespace, so another opted-out
 						// namespace must stay blocked.
-						By("still not reaching it from another namespace")
-						expectReachabilityWithin(ctx, wcClient, controlNamespace, target, false, labelTimeout)
+						By("still not reaching it from another namespace, while the Envoy Gateway namespace does")
+						expectBlocked(ctx, wcClient, controlNamespace, target, controlProbe{Namespace: envoyGatewayNamespace, Pod: probePodName}, labelTimeout)
 
 						By("not reaching it after removing the label")
 						setNamespaceLabels(ctx, wcClient, ingressCtrlNamespace, nil, allowIngressCtrlLabel)
@@ -506,8 +506,46 @@ func TestClusterwideDeny(t *testing.T) {
 						expectReachabilityWithin(ctx, wcClient, envoyGatewayNamespace, target, true, labelTimeout)
 					})
 
-					PIt("grants metrics scraping with allow-metrics-scraping", func() {
-						// Needs a Giant Swarm metrics scraper on the cluster.
+					// The source is a stand-in for the metrics agent in kube-system
+					// (see metricsProbe), since the real one's own egress policies
+					// are not what this spec tests.
+					It("grants metrics scraping with allow-metrics-scraping and removes it with the label", func() {
+						ctx := state.GetContext()
+						wcClient := workloadClusterClient()
+
+						DeferCleanup(func() {
+							deleteMetricsProbe(ctx, wcClient)
+						})
+						ensureMetricsProbe(ctx, wcClient)
+						ensureNamespace(ctx, wcClient, controlNamespace, map[string]string{optOutLabelKey: "false"})
+						ensureProbePod(ctx, wcClient, controlNamespace)
+
+						// Starts opted out, so the first step proves the probe's egress
+						// policy works and the target answers.
+						ensureNamespace(ctx, wcClient, metricsNamespace, map[string]string{optOutLabelKey: "false"})
+						target := ensureListenerPod(ctx, wcClient, metricsNamespace)
+
+						By("reaching the target from the metrics probe while the namespace is opted out (control)")
+						expectReachabilityFromPodWithin(ctx, wcClient, installNamespace, metricsProbePodName, target, true, 3*time.Minute)
+
+						By("not reaching it after removing the opt-out label")
+						setNamespaceLabels(ctx, wcClient, metricsNamespace, nil, optOutLabelKey)
+						expectBlockedFromPod(ctx, wcClient, installNamespace, metricsProbePodName, target, loopbackControl(metricsNamespace, listenerPodName), labelTimeout)
+
+						By("reaching it from the metrics probe after adding allow-metrics-scraping=true")
+						setNamespaceLabels(ctx, wcClient, metricsNamespace, map[string]string{allowMetricsLabel: "true"})
+						expectReachabilityFromPodWithin(ctx, wcClient, installNamespace, metricsProbePodName, target, true, labelTimeout)
+
+						By("still not reaching it from another namespace, while the metrics probe does")
+						expectBlocked(ctx, wcClient, controlNamespace, target, metricsProbeControl, labelTimeout)
+
+						By("not reaching it after removing the label")
+						setNamespaceLabels(ctx, wcClient, metricsNamespace, nil, allowMetricsLabel)
+						expectBlockedFromPod(ctx, wcClient, installNamespace, metricsProbePodName, target, loopbackControl(metricsNamespace, listenerPodName), labelTimeout)
+
+						By("reaching it again after opting the namespace out (control)")
+						setNamespaceLabels(ctx, wcClient, metricsNamespace, map[string]string{optOutLabelKey: "false"})
+						expectReachabilityFromPodWithin(ctx, wcClient, installNamespace, metricsProbePodName, target, true, labelTimeout)
 					})
 
 					PIt("keeps Giant Swarm components healthy and Cilium reporting healthy with the clusterwide deny on", func() {
@@ -542,9 +580,10 @@ func TestClusterwideDeny(t *testing.T) {
 			disableClusterWideDeny(ctx)
 
 			deleteWebhookConfiguration(ctx, wcClient)
+			deleteMetricsProbe(ctx, wcClient)
 			deleteNamespaces(ctx, wcClient, deniedNamespace, controlNamespace, targetNamespace,
 				sameNamespaceNamespace, dnsNamespace, apiServerNamespace, allAllowsNamespace, webhookNamespace,
-				paritySourceNamespace, parityTargetNamespace, allowDNSNamespace, ingressCtrlNamespace, envoyGatewayNamespace)
+				paritySourceNamespace, parityTargetNamespace, allowDNSNamespace, ingressCtrlNamespace, envoyGatewayNamespace, metricsNamespace)
 		}).
 		Run(t, "Clusterwide Deny Test")
 }

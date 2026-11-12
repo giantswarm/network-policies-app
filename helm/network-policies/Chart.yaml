@@ -1,5 +1,5 @@
 apiVersion: v2
-appVersion: 0.0.1
+appVersion: 0.6.0
 version: 0.6.0
 name: network-policies
 description: CiliumNetworkPolicies and NetworkPolicies that should be installed in target cluster.

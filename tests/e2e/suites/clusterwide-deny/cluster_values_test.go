@@ -58,9 +58,23 @@ func setClusterWideAllowDNS(ctx context.Context, enabled bool) error {
 	return setNetworkPoliciesValue(ctx, enabled, "denyByDefault", "clusterWide", "allowDNS", "enabled")
 }
 
-// setNetworkPoliciesValue sets one boolean network-policies value in the cluster app's
-// user config, at networkPoliciesValuesPath plus field.
-func setNetworkPoliciesValue(ctx context.Context, value bool, field ...string) error {
+// setWebhookIngressFromEntities sets the webhook ingress source of the
+// allow-webhook-ingress standard allow the same way. AKS needs [cluster]: the
+// chart default [kube-apiserver, remote-node] doesn't match the API server's
+// webhook calls there (giantswarm/roadmap#4341). The cluster-aks release that
+// sets it isn't out yet, so the suite sets it itself.
+func setWebhookIngressFromEntities(ctx context.Context, entities ...string) error {
+	value := make([]any, 0, len(entities))
+	for _, entity := range entities {
+		value = append(value, entity)
+	}
+	return setNetworkPoliciesValue(ctx, value, "standardAllows", "webhookIngress", "fromEntities")
+}
+
+// setNetworkPoliciesValue sets one network-policies value in the cluster app's
+// user config, at networkPoliciesValuesPath plus field. The value must be a
+// JSON-compatible type (bool, string, []any, map[string]any).
+func setNetworkPoliciesValue(ctx context.Context, value any, field ...string) error {
 	cluster := state.GetCluster()
 	key := types.NamespacedName{
 		Name:      fmt.Sprintf("%s-userconfig", cluster.ClusterApp.InstallName),

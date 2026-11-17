@@ -12,6 +12,7 @@ import (
 	helmv2 "github.com/fluxcd/helm-controller/api/v2"
 	"github.com/giantswarm/apptest-framework/v5/pkg/state"
 	"github.com/giantswarm/apptest-framework/v5/pkg/suite"
+	"github.com/giantswarm/clustertest/v5/pkg/application"
 	"github.com/giantswarm/clustertest/v5/pkg/logger"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -136,6 +137,12 @@ func TestClusterwideDeny(t *testing.T) {
 					// focused spec still runs with the deny on.
 					BeforeAll(func() {
 						ctx := state.GetContext()
+						// TODO: remove once an AKS Release carries the cluster-aks version
+						// with giantswarm/cluster-aks#96, which sets the webhook source
+						// itself; the override would hide a regression there.
+						if state.GetCluster().Provider == application.ProviderAKS {
+							Expect(setWebhookIngressFromEntities(ctx, "cluster")).To(Succeed())
+						}
 						Expect(setClusterWideDeny(ctx, true)).To(Succeed())
 						denyEnabled = true
 						expectClusterWideDenyPolicy(ctx)
@@ -426,7 +433,8 @@ func TestClusterwideDeny(t *testing.T) {
 
 					// The webhook source is per provider: the chart default
 					// [kube-apiserver, remote-node] covers the providers the
-					// spike ran on, AKS needs [cluster] (giantswarm/roadmap#4341).
+					// spike ran on, AKS needs [cluster] (giantswarm/roadmap#4341),
+					// which the BeforeAll sets.
 					It("grants webhook ingress with allow-webhook-ingress and removes it with the label", func() {
 						ctx := state.GetContext()
 						wcClient := workloadClusterClient()

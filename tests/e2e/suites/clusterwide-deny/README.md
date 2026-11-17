@@ -10,13 +10,15 @@ pods, not on rendered manifests.
 
 Runs with the clusterwide deny (giantswarm/roadmap#4340) and the label-selected
 standard allows (giantswarm/roadmap#4376) in the chart, on CAPA (`capa`), CAPZ
-(`capz`, cluster-azure), CAPV (`capv`, cluster-vsphere) and CAPVCD (`capvcd`,
-cluster-cloud-director). The other providers are added one at a time, each in
-its own PR that only merges once the suite is green on that provider there:
+(`capz`, cluster-azure), CAPV (`capv`, cluster-vsphere), CAPVCD (`capvcd`,
+cluster-cloud-director) and AKS (`aks`, cluster-aks). The other providers are
+added one at a time, each in its own PR that only merges once the suite is green
+on that provider there:
 every provider in `config.yaml` becomes a required check on every PR (Heimdall).
-AKS (`aks`, cluster-aks) is a separate provider from CAPZ and also needs
-`standardAllows.webhookIngress.fromEntities: [cluster]` from its cluster values
-(giantswarm/roadmap#4341). The specs run in an `Ordered` container, so after the
+AKS is a separate provider from CAPZ and needs
+`standardAllows.webhookIngress.fromEntities: [cluster]` (giantswarm/roadmap#4341).
+Until a cluster-aks release sets it, the suite sets it in the cluster values
+before it turns the deny on. The specs run in an `Ordered` container, so after the
 first failure the rest are skipped. That includes the deny disabled parity spec:
 it runs first, while the deny is still off, so a failure there skips every deny
 spec.
@@ -51,7 +53,10 @@ The webhook spec scopes a `ValidatingWebhookConfiguration` (failurePolicy
 Ignore) to labelled probe ConfigMaps in its own namespace and points it at a
 listener pod that counts the connections it accepts. A dry-run ConfigMap CREATE
 that adds a connection means the API server reached the pod. It starts and ends
-with the namespace opted out as the control.
+with the namespace opted out as the control. On AKS the API server's calls only
+match the `cluster` entity, so the suite sets
+`standardAllows.webhookIngress.fromEntities: [cluster]` there before the deny is
+turned on.
 
 The ingress controller and metrics scraping specs stand in for the real
 sources, which these specs don't test:
@@ -97,7 +102,7 @@ dropped DNS query.
 - `webhook_test.go` the webhook listener, its `ValidatingWebhookConfiguration`
   and the webhook reachability assertion.
 - `cluster_values_test.go` turns the clusterwide deny on and off through the
-  cluster values and waits for the result.
+  cluster values and waits for the result, and sets the AKS webhook source.
 - `values.yaml` chart values for this suite (deny off at creation).
 - `config.yaml` provider list (overrides `../../config.yaml` for this suite).
 
